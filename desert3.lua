@@ -831,7 +831,6 @@ end)
 
 local EspTab = Win:Tab("ESP", "eye")
 local EspPlayerSection = EspTab:Section("player esp", "Left")
-local EspStyleSection = EspTab:Section("skeet style", "Left")
 local EspInfoSection = EspTab:Section("information", "Right")
 local EspRangeSection = EspTab:Section("filtering", "Right")
 
@@ -845,7 +844,7 @@ EspPlayerSection:Toggle("Roblox team check", false, function(Value)
 	Flags.EspTeamCheck = Value
 end):Tooltip("Roblox teams only; this may not match DesertStorm squads.")
 
-local BoxToggle = EspStyleSection:Toggle("bounding box", true, function(Value)
+local BoxToggle = EspPlayerSection:Toggle("bounding box", true, function(Value)
 	Flags.EspBox = Value
 end)
 
@@ -854,7 +853,7 @@ BoxToggle:AddColorpicker("box color", Flags.EspBoxColor, function(Color, Alpha)
 	Flags.EspBoxAlpha = Alpha
 end)
 
-local ChamsToggle = EspStyleSection:Toggle("2D chams", false, function(Value)
+local ChamsToggle = EspPlayerSection:Toggle("2D chams", false, function(Value)
 	Flags.EspChams = Value
 end)
 
@@ -865,11 +864,11 @@ end)
 
 ChamsToggle:Tooltip("Through-wall translucent body fill using Matcha's external Drawing renderer.")
 
-EspStyleSection:Toggle("health bar", true, function(Value)
+EspPlayerSection:Toggle("health bar", true, function(Value)
 	Flags.EspHealth = Value
 end)
 
-local SnaplineToggle = EspStyleSection:Toggle("snapline", false, function(Value)
+local SnaplineToggle = EspPlayerSection:Toggle("snapline", false, function(Value)
 	Flags.EspSnapline = Value
 end)
 
