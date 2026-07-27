@@ -420,10 +420,6 @@ SilentAim = function(Origin)
 end
 
 local function LoadUiLibrary()
-	if INSui then
-		return INSui
-	end
-
 	local Success, Result = pcall(function()
 		local Source = game:HttpGet("https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua")
 		assert(type(Source) == "string" and #Source > 0, "empty UI library response")
@@ -432,6 +428,8 @@ local function LoadUiLibrary()
 		assert(type(Chunk) == "function", "UI library compilation failed")
 
 		local LoadedLibrary = Chunk()
+		-- A destroyed INS-ui singleton cannot create another window. Executing
+		-- the source again replaces its global instance and stops its old loop.
 		return LoadedLibrary or INSui
 	end)
 
@@ -788,6 +786,8 @@ pcall(function()
 end)
 
 local EspBundles = {}
+local EspTargetCache = {}
+local EspWeaponCache = {}
 local EspErrorReported = false
 local EspRendererFailed = false
 local EspSkippedProperties = {}
@@ -1030,6 +1030,21 @@ local function GetHeldWeaponName(Character)
 	return nil
 end
 
+local function GetCachedWeaponName(Character)
+	local Now = tick()
+	local Cached = EspWeaponCache[Character]
+	if Cached and Now < Cached.ExpiresAt then
+		return Cached.Name
+	end
+
+	local WeaponName = GetHeldWeaponName(Character)
+	EspWeaponCache[Character] = {
+		Name = WeaponName,
+		ExpiresAt = Now + 0.25,
+	}
+	return WeaponName
+end
+
 local function SafeFindFirstChild(Parent, Name)
 	local Success, Child = pcall(function()
 		return Parent and Parent:FindFirstChild(Name)
@@ -1136,11 +1151,44 @@ local function GetEspTarget(Player)
 
 	local Character = GetPlayerCharacter(Player)
 	if not Character then
+		EspTargetCache[Player] = nil
 		return nil
 	end
 
-	local Humanoid, Head, RootPart = ResolveEspCharacter(Character)
+	local Now = tick()
+	local Cached = EspTargetCache[Player]
+	local Humanoid
+	local Head
+	local RootPart
+
+	if Cached and Cached.Character == Character and Now < Cached.ExpiresAt then
+		Humanoid = Cached.Humanoid
+		Head = Cached.Head
+		RootPart = Cached.RootPart
+	else
+		Humanoid, Head, RootPart = ResolveEspCharacter(Character)
+		local DisplayName = Player.Name
+		pcall(function()
+			if Player.DisplayName and Player.DisplayName ~= "" then
+				DisplayName = Player.DisplayName
+			end
+		end)
+		Cached = {
+			Character = Character,
+			Humanoid = Humanoid,
+			Head = Head,
+			RootPart = RootPart,
+			DisplayName = DisplayName,
+			ExpiresAt = Now + 0.75,
+		}
+		EspTargetCache[Player] = Cached
+	end
+
 	if not RootPart or not Head then
+		return nil
+	end
+	if not GetPartPosition(Head) or not GetPartPosition(RootPart) then
+		EspTargetCache[Player] = nil
 		return nil
 	end
 
@@ -1163,6 +1211,8 @@ local function GetEspTarget(Player)
 		RootPart = RootPart,
 		Health = Health,
 		MaxHealth = math.max(MaxHealth or 100, 1),
+		WeaponName = Flags.EspWeapon and GetCachedWeaponName(Character) or nil,
+		DisplayName = Cached and Cached.DisplayName or Player.Name,
 	}
 end
 
@@ -1261,13 +1311,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 	end
 
 	if Flags.EspName and Bundle.Name then
-		local DisplayName = Target.Player.Name
-		pcall(function()
-			if Target.Player.DisplayName and Target.Player.DisplayName ~= "" then
-				DisplayName = Target.Player.DisplayName
-			end
-		end)
-		Bundle.Name.Text = DisplayName
+		Bundle.Name.Text = Target.DisplayName
 		Bundle.Name.Position = Vector2.new(X + Width * 0.5, Y - 15)
 		Bundle.Name.Color = Flags.EspTextColor
 		Bundle.Name.Transparency = Flags.EspTextAlpha
@@ -1279,7 +1323,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		InfoParts[#InfoParts + 1] = "[" .. tostring(math.floor(Distance + 0.5)) .. "u]"
 	end
 	if Flags.EspWeapon then
-		local WeaponName = GetHeldWeaponName(Target.Character)
+		local WeaponName = Target.WeaponName
 		if WeaponName then
 			InfoParts[#InfoParts + 1] = WeaponName
 		end
@@ -1324,7 +1368,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 	return true
 end
 
-TrackConnection(RunService.RenderStepped:Connect(function()
+local function UpdateEspFrame()
 	for _, Bundle in EspBundles do
 		HideEspBundle(Bundle)
 	end
@@ -1383,7 +1427,17 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 			EspStatus.Text = EspStatus.Text .. " | compat"
 		end
 	end
-end))
+end
+
+task.spawn(function()
+	while Flags.Running do
+		local Success, ErrorMessage = pcall(UpdateEspFrame)
+		if not Success then
+			ReportEspError("ESP frame failed", ErrorMessage)
+		end
+		task.wait(1 / 144)
+	end
+end)
 
 local FovCircleOutline = TrackDrawing(Drawing.new("Circle"))
 FovCircleOutline.Thickness = 3
