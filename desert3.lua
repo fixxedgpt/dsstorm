@@ -1033,7 +1033,7 @@ CrateEspSection:Slider("max distance", Flags.CrateEspMaxDistance, 25, 100, 5000,
 end)
 
 CrateEspSection:Label(function()
-	return "status: " .. CrateEspStatus.Text
+	return "status [crate-v2]: " .. CrateEspStatus.Text
 end)
 
 local SettingsTab = Win:AddSettingsTab("cog")
