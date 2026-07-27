@@ -37,7 +37,9 @@ local Flags = {
 	AimbotActive = false,
 	AutoPrediction = true,
 	SilentAim = false,
-	SilentAimActive = false,
+	SilentFovCheck = true,
+	SilentFovRadius = 80,
+	SilentMaxDistance = 1800,
 	TeamCheck = false,
 	FovCheck = true,
 	TargetParts = { "Head" },
@@ -79,6 +81,9 @@ local SilentAim
 local EspStatus = {
 	Text = "off",
 	LastError = nil,
+}
+local SilentAimStatus = {
+	Text = "inactive",
 }
 
 local Runtime = {}
@@ -311,12 +316,20 @@ local function GetLockedTarget()
 	return nil
 end
 
-local function FindClosestTarget()
+local function FindClosestTarget(Selection)
+	Selection = Selection or {}
+	local UseFov = Selection.FovCheck
+	if UseFov == nil then
+		UseFov = Flags.FovCheck
+	end
+	local FovRadius = Selection.FovRadius or Flags.FovRadius
+	local MaxDistance = Selection.MaxDistance or Flags.MaxAcquireDistance
 	local Mouse = LocalPlayer:GetMouse()
 	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
 	local LocalRoot = GetLocalRoot()
 	local ClosestTarget
 	local ClosestScreenDistance = math.huge
+	local ClosestWorldDistance
 
 	for _, Player in Players:GetPlayers() do
 		local Target = BuildTarget(Player)
@@ -330,8 +343,12 @@ local function FindClosestTarget()
 		end
 
 		local LocalPosition = GetPartPosition(LocalRoot)
-		if LocalPosition and (LocalPosition - TargetPosition).Magnitude > Flags.MaxAcquireDistance then
-			continue
+		local WorldDistance
+		if LocalPosition then
+			WorldDistance = (LocalPosition - TargetPosition).Magnitude
+			if WorldDistance > MaxDistance then
+				continue
+			end
 		end
 
 		local ScreenPosition, OnScreen = ProjectToScreen(TargetPosition)
@@ -342,17 +359,18 @@ local function FindClosestTarget()
 		local DeltaX = ScreenPosition.X - MousePosition.X
 		local DeltaY = ScreenPosition.Y - MousePosition.Y
 		local ScreenDistance = math.sqrt(DeltaX * DeltaX + DeltaY * DeltaY)
-		if Flags.FovCheck and ScreenDistance > Flags.FovRadius then
+		if UseFov and ScreenDistance > FovRadius then
 			continue
 		end
 
 		if ScreenDistance < ClosestScreenDistance then
 			ClosestScreenDistance = ScreenDistance
 			ClosestTarget = Target
+			ClosestWorldDistance = WorldDistance
 		end
 	end
 
-	return ClosestTarget
+	return ClosestTarget, ClosestScreenDistance, ClosestWorldDistance
 end
 
 local function PredictTargetPosition(Target, Origin)
@@ -394,16 +412,36 @@ local function PredictTargetPosition(Target, Origin)
 	return PredictedPosition + Vector3.new(0, DropCompensation, 0)
 end
 
+local function UpdateSilentTargetStatus(Target, ScreenDistance, WorldDistance)
+	if not Target then
+		SilentAimStatus.Text = "no target"
+		return
+	end
+
+	local HitboxName = "target"
+	pcall(function()
+		HitboxName = Target.TargetPart.Name
+	end)
+	SilentAimStatus.Text = HitboxName
+		.. " | "
+		.. tostring(math.floor((WorldDistance or 0) + 0.5))
+		.. "u | "
+		.. tostring(math.floor((ScreenDistance or 0) + 0.5))
+		.. "px"
+end
+
 SilentAim = function(Origin)
-	if not Flags.SilentAim or not Flags.SilentAimActive then
+	if not Flags.SilentAim then
 		return nil
 	end
 
-	local Target = GetLockedTarget()
+	local Target, ScreenDistance, WorldDistance = FindClosestTarget({
+		FovCheck = Flags.SilentFovCheck,
+		FovRadius = Flags.SilentFovRadius,
+		MaxDistance = Flags.SilentMaxDistance,
+	})
 	if not Target then
-		Target = FindClosestTarget()
-	end
-	if not Target then
+		UpdateSilentTargetStatus(nil)
 		return nil
 	end
 
@@ -415,6 +453,8 @@ SilentAim = function(Origin)
 	if not ShotOrigin then
 		return nil
 	end
+
+	UpdateSilentTargetStatus(Target, ScreenDistance, WorldDistance)
 
 	return PredictTargetPosition(Target, ShotOrigin), Target.TargetPart, Target.Player
 end
@@ -672,15 +712,31 @@ PredictionSection:Dropdown(
 local SilentAimToggle = SilentSection:Toggle("silent aim", false, function(Value)
 	Flags.SilentAim = Value
 	if not Value then
-		Flags.SilentAimActive = false
+		SilentAimStatus.Text = "inactive"
 	end
 end):Tooltip("Exports SilentAim(origin); the new game's shot function must call it.")
 
 SilentAimToggle:AddKeybind("V", "Hold", function(Value)
-	Flags.SilentAimActive = Value
+	if SilentAimToggle:Get() ~= Value then
+		SilentAimToggle:Set(Value)
+	end
 end)
 
-SilentSection:Label("resolver: SilentAim(origin)")
+SilentSection:Toggle("target fov", true, function(Value)
+	Flags.SilentFovCheck = Value
+end)
+
+SilentSection:Slider("head proximity", Flags.SilentFovRadius, 1, 5, 400, "px", function(Value)
+	Flags.SilentFovRadius = Value
+end):Tooltip("Maximum cursor distance from the selected hitbox.")
+
+SilentSection:Slider("max range", Flags.SilentMaxDistance, 25, 100, 5000, "u", function(Value)
+	Flags.SilentMaxDistance = Value
+end):Tooltip("Maximum world distance for Silent Aim target selection.")
+
+SilentSection:Label(function()
+	return "target: " .. SilentAimStatus.Text
+end)
 
 local EspTab = Win:Tab("ESP", "eye")
 local EspPlayerSection = EspTab:Section("player esp", "Left")
@@ -1543,76 +1599,4 @@ FovCircleOutline.NumSides = 96
 FovCircleOutline.Color = Color3.fromRGB(0, 0, 0)
 FovCircleOutline.Visible = false
 
-local FovCircle = TrackDrawing(Drawing.new("Circle"))
-FovCircle.Thickness = 1
-FovCircle.NumSides = 96
-FovCircle.Visible = false
-FovCircle.ZIndex = 5
-
-TrackConnection(RunService.RenderStepped:Connect(function()
-	if not Flags.Running then
-		return
-	end
-
-	local Mouse = LocalPlayer:GetMouse()
-	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
-	local ShowFov = (Flags.Aimbot or Flags.SilentAim) and Flags.FovCheck
-
-	FovCircleOutline.Position = MousePosition
-	FovCircleOutline.Radius = Flags.FovRadius + 1
-	FovCircleOutline.Transparency = Flags.FovAlpha
-	FovCircleOutline.Visible = ShowFov
-
-	FovCircle.Position = MousePosition
-	FovCircle.Radius = Flags.FovRadius
-	FovCircle.Color = Flags.FovColor
-	FovCircle.Transparency = Flags.FovAlpha
-	FovCircle.Visible = ShowFov
-end))
-
-TrackConnection(RunService.Heartbeat:Connect(function()
-	if not Flags.Running then
-		return
-	end
-
-	if not Flags.Aimbot or not Flags.AimbotActive then
-		ClearLock()
-		return
-	end
-
-	local Camera = Workspace.CurrentCamera
-	if not Camera then
-		return
-	end
-
-	local Target = GetLockedTarget()
-	if not Target then
-		Flags.LockedPlayerName = nil
-		Target = FindClosestTarget()
-		if Target then
-			Flags.LockedPlayerName = Target.Player.Name
-		end
-	end
-
-	if not Target then
-		return
-	end
-
-	local CameraPosition = Camera.Position
-	local AimPosition = PredictTargetPosition(Target, CameraPosition)
-	if not AimPosition then
-		ClearLock()
-		return
-	end
-
-	local AimSuccess = pcall(function()
-		Camera.lookAt(CameraPosition, AimPosition)
-	end)
-	if not AimSuccess then
-		ClearLock()
-	end
-end))
-
-Environment.SilentAim = SilentAim
-Environment.UnloadDesertStormAim = Runtime.Unload
-Environment.__MatchaAimRuntime = Runtime
+local FovCircle = Tr
