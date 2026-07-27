@@ -43,7 +43,7 @@ local Flags = {
 	TeamCheck = false,
 	StickyAim = true,
 	FovCheck = true,
-	TargetParts = { "Head" },
+	TargetParts = { "Head", "Upper Torso" },
 	AimProfile = "Rifles",
 	AimSmoothness = 20,
 	FovRadius = 120,
@@ -615,6 +615,18 @@ local AcquireRangeSlider = TargetSection:Slider(
 	end
 ):Tooltip("Maximum target acquisition distance in Roblox studs.")
 
+local SmoothnessSlider = TargetSection:Slider(
+	"smoothness",
+	Flags.AimSmoothness,
+	1,
+	0,
+	100,
+	"%",
+	function(Value)
+		Flags.AimSmoothness = Value
+	end
+):Tooltip("0% snaps instantly; higher values follow the target more gradually.")
+
 local TargetHitboxDropdown = TargetSection:Dropdown(
 	"target hitboxes",
 	Flags.TargetParts,
@@ -653,53 +665,71 @@ local AimProfiles = {
 	},
 }
 
-local SmoothnessSlider
-TargetSection:Dropdown(
-	"profiles",
-	{ Flags.AimProfile },
-	{ "Rifles", "Sniper", "Hybrid" },
-	false,
-	function(Value)
-		local ProfileName = Value[1]
-		local Profile = AimProfiles[ProfileName]
-		if not Profile then
-			return
-		end
+TargetSection:Label("profiles")
 
-		Flags.AimProfile = ProfileName
-		FovRadiusSlider:Set(Profile.FovRadius)
-		AcquireRangeSlider:Set(Profile.MaxDistance)
-		TargetHitboxDropdown:Set(Profile.Hitboxes)
-		if SmoothnessSlider then
-			SmoothnessSlider:Set(Profile.Smoothness)
-		else
-			Flags.AimSmoothness = Profile.Smoothness
-		end
-		ClearLock()
+local ProfileToggles = {}
+local UpdatingAimProfile = false
+
+local function SetAimProfile(ProfileName, Enabled)
+	if UpdatingAimProfile then
+		return
 	end
-):Tooltip("DesertStorm-oriented target presets. You can still adjust every value afterward.")
 
-SmoothnessSlider = TargetSection:Slider(
-	"smoothness",
-	Flags.AimSmoothness,
-	1,
-	0,
-	100,
-	"%",
-	function(Value)
-		Flags.AimSmoothness = Value
+	if not Enabled then
+		if Flags.AimProfile == ProfileName then
+			Flags.AimProfile = nil
+		end
+		return
 	end
-):Tooltip("0% snaps instantly; higher values follow the target more gradually.")
 
+	local Profile = AimProfiles[ProfileName]
+	if not Profile then
+		return
+	end
+
+	UpdatingAimProfile = true
+	for OtherName, Toggle in ProfileToggles do
+		if OtherName ~= ProfileName and Toggle:Get() then
+			Toggle:Set(false)
+		end
+	end
+	UpdatingAimProfile = false
+
+	Flags.AimProfile = ProfileName
+	FovRadiusSlider:Set(Profile.FovRadius)
+	AcquireRangeSlider:Set(Profile.MaxDistance)
+	SmoothnessSlider:Set(Profile.Smoothness)
+	TargetHitboxDropdown:Set(Profile.Hitboxes)
+	ClearLock()
+end
+
+ProfileToggles.Rifles = TargetSection:Toggle("Rifles", true, function(Value)
+	SetAimProfile("Rifles", Value)
+end)
+
+ProfileToggles.Sniper = TargetSection:Toggle("Sniper", false, function(Value)
+	SetAimProfile("Sniper", Value)
+end)
+
+ProfileToggles.Hybrid = TargetSection:Toggle("Hybrid", false, function(Value)
+	SetAimProfile("Hybrid", Value)
+end)
+
+local AutoPredictionOverlay
 local AutoPredictionToggle = PredictionSection:Toggle("auto prediction", true, function(Value)
 	Flags.AutoPrediction = Value
-end)
-
-AutoPredictionToggle:AddKeybind("P", "Always", function(Value)
-	if AutoPredictionToggle:Get() ~= Value then
-		AutoPredictionToggle:Set(Value)
+	if AutoPredictionOverlay and AutoPredictionOverlay:Get() ~= Value then
+		AutoPredictionOverlay:Set(Value)
 	end
 end)
+
+-- INS-ui's overlay normally requires a visible bind control. This hidden,
+-- non-configurable status row mirrors the checkbox and contributes only an
+-- "ON" state to the keybind overlay.
+AutoPredictionOverlay = PredictionSection:Toggle("auto prediction", Flags.AutoPrediction, function() end)
+AutoPredictionOverlay.item.noSave = true
+AutoPredictionOverlay:DependsOn({ item = { value = false } })
+AutoPredictionOverlay:AddKeybind("on", "Always")
 
 local ProjectileSpeedSlider = PredictionSection:Slider(
 	"projectile speed",
