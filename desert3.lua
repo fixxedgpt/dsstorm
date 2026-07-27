@@ -790,6 +790,7 @@ end)
 local EspBundles = {}
 local EspErrorReported = false
 local EspRendererFailed = false
+local EspSkippedProperties = {}
 
 local function ReportEspError(Prefix, ErrorMessage)
 	local FullMessage = Prefix .. ": " .. tostring(ErrorMessage)
@@ -806,72 +807,111 @@ local function ReportEspError(Prefix, ErrorMessage)
 	end
 end
 
-local function SetTextDefaults(TextObject, Centered)
-	TextObject.Color = Flags.EspTextColor
-	TextObject.FontSize = 13
-	TextObject.Center = Centered
-	TextObject.Outline = true
-	TextObject.Visible = false
-	TextObject.ZIndex = 14
-	pcall(function()
-		TextObject.Font = Drawing.Fonts.UI
+local function SetDrawingProperty(DrawingObject, Property, Value)
+	if not DrawingObject then
+		return false
+	end
+
+	local Success = pcall(function()
+		DrawingObject[Property] = Value
 	end)
+	if not Success then
+		EspSkippedProperties[Property] = true
+	end
+	return Success
+end
+
+local function CreateDrawingObject(DrawingType)
+	local Success, DrawingObject = pcall(function()
+		return Drawing.new(DrawingType)
+	end)
+	if not Success or not DrawingObject then
+		return nil
+	end
+	return TrackDrawing(DrawingObject)
+end
+
+local function SetTextDefaults(TextObject, Centered)
+	SetDrawingProperty(TextObject, "Color", Flags.EspTextColor)
+	SetDrawingProperty(TextObject, "FontSize", 13)
+	SetDrawingProperty(TextObject, "Center", Centered)
+	SetDrawingProperty(TextObject, "Outline", true)
+	SetDrawingProperty(TextObject, "Visible", false)
+	SetDrawingProperty(TextObject, "ZIndex", 14)
+	local Font
+	pcall(function()
+		Font = Drawing.Fonts.UI
+	end)
+	if Font then
+		SetDrawingProperty(TextObject, "Font", Font)
+	end
 end
 
 local function CreateEspBundle()
 	local Bundle = {
-		Chams = TrackDrawing(Drawing.new("Square")),
 		BoxOutline = {},
 		Box = {},
-		HealthBackground = TrackDrawing(Drawing.new("Square")),
-		HealthBar = TrackDrawing(Drawing.new("Square")),
-		Name = TrackDrawing(Drawing.new("Text")),
-		Info = TrackDrawing(Drawing.new("Text")),
-		Flag = TrackDrawing(Drawing.new("Text")),
-		SnaplineOutline = TrackDrawing(Drawing.new("Line")),
-		Snapline = TrackDrawing(Drawing.new("Line")),
 	}
 
-	Bundle.Chams.Filled = true
-	Bundle.Chams.Visible = false
-	Bundle.Chams.ZIndex = 5
-
 	for Index = 1, 4 do
-		local OutlineLine = TrackDrawing(Drawing.new("Line"))
-		OutlineLine.Thickness = 3
-		OutlineLine.Color = Color3.fromRGB(0, 0, 0)
-		OutlineLine.Visible = false
-		OutlineLine.ZIndex = 10
-		Bundle.BoxOutline[Index] = OutlineLine
-
-		local BoxLine = TrackDrawing(Drawing.new("Line"))
-		BoxLine.Thickness = 1
-		BoxLine.Visible = false
-		BoxLine.ZIndex = 11
-		Bundle.Box[Index] = BoxLine
+		local BoxLine = CreateDrawingObject("Line")
+		if BoxLine then
+			SetDrawingProperty(BoxLine, "Thickness", 1)
+			SetDrawingProperty(BoxLine, "Visible", false)
+			SetDrawingProperty(BoxLine, "ZIndex", 11)
+			Bundle.Box[#Bundle.Box + 1] = BoxLine
+		end
 	end
 
-	Bundle.HealthBackground.Filled = true
-	Bundle.HealthBackground.Color = Color3.fromRGB(0, 0, 0)
-	Bundle.HealthBackground.Visible = false
-	Bundle.HealthBackground.ZIndex = 10
-
-	Bundle.HealthBar.Filled = true
-	Bundle.HealthBar.Visible = false
-	Bundle.HealthBar.ZIndex = 11
-
+	Bundle.Name = CreateDrawingObject("Text")
 	SetTextDefaults(Bundle.Name, true)
+
+	for Index = 1, 4 do
+		local OutlineLine = CreateDrawingObject("Line")
+		if OutlineLine then
+			SetDrawingProperty(OutlineLine, "Thickness", 3)
+			SetDrawingProperty(OutlineLine, "Color", Color3.fromRGB(0, 0, 0))
+			SetDrawingProperty(OutlineLine, "Visible", false)
+			SetDrawingProperty(OutlineLine, "ZIndex", 10)
+			Bundle.BoxOutline[#Bundle.BoxOutline + 1] = OutlineLine
+		end
+	end
+
+	Bundle.Info = CreateDrawingObject("Text")
+	Bundle.Flag = CreateDrawingObject("Text")
 	SetTextDefaults(Bundle.Info, true)
 	SetTextDefaults(Bundle.Flag, false)
 
-	Bundle.SnaplineOutline.Thickness = 3
-	Bundle.SnaplineOutline.Color = Color3.fromRGB(0, 0, 0)
-	Bundle.SnaplineOutline.Visible = false
-	Bundle.SnaplineOutline.ZIndex = 9
+	Bundle.HealthBackground = CreateDrawingObject("Square")
+	Bundle.HealthBar = CreateDrawingObject("Square")
+	SetDrawingProperty(Bundle.HealthBackground, "Filled", true)
+	SetDrawingProperty(Bundle.HealthBackground, "Color", Color3.fromRGB(0, 0, 0))
+	SetDrawingProperty(Bundle.HealthBackground, "Visible", false)
+	SetDrawingProperty(Bundle.HealthBackground, "ZIndex", 10)
 
-	Bundle.Snapline.Thickness = 1
-	Bundle.Snapline.Visible = false
-	Bundle.Snapline.ZIndex = 10
+	SetDrawingProperty(Bundle.HealthBar, "Filled", true)
+	SetDrawingProperty(Bundle.HealthBar, "Visible", false)
+	SetDrawingProperty(Bundle.HealthBar, "ZIndex", 11)
+
+	Bundle.Chams = CreateDrawingObject("Square")
+	SetDrawingProperty(Bundle.Chams, "Filled", true)
+	SetDrawingProperty(Bundle.Chams, "Visible", false)
+	SetDrawingProperty(Bundle.Chams, "ZIndex", 5)
+
+	Bundle.SnaplineOutline = CreateDrawingObject("Line")
+	Bundle.Snapline = CreateDrawingObject("Line")
+	SetDrawingProperty(Bundle.SnaplineOutline, "Thickness", 3)
+	SetDrawingProperty(Bundle.SnaplineOutline, "Color", Color3.fromRGB(0, 0, 0))
+	SetDrawingProperty(Bundle.SnaplineOutline, "Visible", false)
+	SetDrawingProperty(Bundle.SnaplineOutline, "ZIndex", 9)
+
+	SetDrawingProperty(Bundle.Snapline, "Thickness", 1)
+	SetDrawingProperty(Bundle.Snapline, "Visible", false)
+	SetDrawingProperty(Bundle.Snapline, "ZIndex", 10)
+
+	if #Bundle.Box == 0 and not Bundle.Name and not Bundle.Chams then
+		assert(false, "Matcha rejected Line, Text, and Square drawings")
+	end
 
 	return Bundle
 end
@@ -881,23 +921,43 @@ local function HideEspBundle(Bundle)
 		return
 	end
 
-	Bundle.Chams.Visible = false
+	if Bundle.Chams then
+		Bundle.Chams.Visible = false
+	end
 	for _, Line in Bundle.BoxOutline do
 		Line.Visible = false
 	end
 	for _, Line in Bundle.Box do
 		Line.Visible = false
 	end
-	Bundle.HealthBackground.Visible = false
-	Bundle.HealthBar.Visible = false
-	Bundle.Name.Visible = false
-	Bundle.Info.Visible = false
-	Bundle.Flag.Visible = false
-	Bundle.SnaplineOutline.Visible = false
-	Bundle.Snapline.Visible = false
+	if Bundle.HealthBackground then
+		Bundle.HealthBackground.Visible = false
+	end
+	if Bundle.HealthBar then
+		Bundle.HealthBar.Visible = false
+	end
+	if Bundle.Name then
+		Bundle.Name.Visible = false
+	end
+	if Bundle.Info then
+		Bundle.Info.Visible = false
+	end
+	if Bundle.Flag then
+		Bundle.Flag.Visible = false
+	end
+	if Bundle.SnaplineOutline then
+		Bundle.SnaplineOutline.Visible = false
+	end
+	if Bundle.Snapline then
+		Bundle.Snapline.Visible = false
+	end
 end
 
 local function SetEspBoxLines(Lines, X, Y, Width, Height, Color, Alpha)
+	if not Lines or #Lines < 4 then
+		return false
+	end
+
 	local TopLeft = Vector2.new(X, Y)
 	local TopRight = Vector2.new(X + Width, Y)
 	local BottomRight = Vector2.new(X + Width, Y + Height)
@@ -917,6 +977,7 @@ local function SetEspBoxLines(Lines, X, Y, Width, Height, Color, Alpha)
 		Line.Transparency = Alpha
 		Line.Visible = true
 	end
+	return true
 end
 
 local function GetEspBundle(Player)
@@ -1163,7 +1224,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		return
 	end
 
-	if Flags.EspChams then
+	if Flags.EspChams and Bundle.Chams then
 		Bundle.Chams.Position = Vector2.new(X + 2, Y + 2)
 		Bundle.Chams.Size = Vector2.new(math.max(Width - 4, 1), math.max(Height - 4, 1))
 		Bundle.Chams.Color = Flags.EspChamsColor
@@ -1184,7 +1245,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		SetEspBoxLines(Bundle.Box, X, Y, Width, Height, Flags.EspBoxColor, Flags.EspBoxAlpha)
 	end
 
-	if Flags.EspHealth then
+	if Flags.EspHealth and Bundle.HealthBackground and Bundle.HealthBar then
 		local HealthRatio = Clamp(Target.Health / Target.MaxHealth, 0, 1)
 		local BarHeight = math.max(math.floor((Height - 2) * HealthRatio), 1)
 		Bundle.HealthBackground.Position = Vector2.new(X - 6, Y - 1)
@@ -1199,7 +1260,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		Bundle.HealthBar.Visible = true
 	end
 
-	if Flags.EspName then
+	if Flags.EspName and Bundle.Name then
 		local DisplayName = Target.Player.Name
 		pcall(function()
 			if Target.Player.DisplayName and Target.Player.DisplayName ~= "" then
@@ -1223,7 +1284,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 			InfoParts[#InfoParts + 1] = WeaponName
 		end
 	end
-	if #InfoParts > 0 then
+	if #InfoParts > 0 and Bundle.Info then
 		Bundle.Info.Text = table.concat(InfoParts, "  ")
 		Bundle.Info.Position = Vector2.new(X + Width * 0.5, Y + Height + 2)
 		Bundle.Info.Color = Flags.EspTextColor
@@ -1231,7 +1292,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		Bundle.Info.Visible = true
 	end
 
-	if Flags.LockedPlayerName == Target.Player.Name then
+	if Bundle.Flag and Flags.LockedPlayerName == Target.Player.Name then
 		Bundle.Flag.Text = "TARGET"
 		Bundle.Flag.Position = Vector2.new(X + Width + 4, Y)
 		Bundle.Flag.Color = Color3.fromRGB(149, 192, 33)
@@ -1239,7 +1300,7 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		Bundle.Flag.Visible = true
 	end
 
-	if Flags.EspSnapline then
+	if Flags.EspSnapline and Bundle.SnaplineOutline and Bundle.Snapline then
 		local ViewportSize
 		pcall(function()
 			ViewportSize = Camera.ViewportSize
@@ -1273,7 +1334,9 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 		return
 	end
 	if EspRendererFailed then
-		EspStatus.Text = "renderer unavailable"
+		if not EspStatus.LastError then
+			EspStatus.Text = "renderer unavailable"
+		end
 		return
 	end
 
@@ -1316,6 +1379,9 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 			.. " drawn | "
 			.. tostring(PlayerCount)
 			.. " players"
+		if next(EspSkippedProperties) then
+			EspStatus.Text = EspStatus.Text .. " | compat"
+		end
 	end
 end))
 
