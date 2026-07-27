@@ -99,6 +99,7 @@ local CrateEspStatus = {
 	Text = "off",
 }
 local CrateTrackChoices = { "All crates" }
+local RequestCrateEspScan
 local SilentAimStatus = {
 	Text = "inactive",
 }
@@ -968,6 +969,9 @@ end)
 local CrateEspToggle = CrateEspSection:Toggle("enabled", false, function(Value)
 	Flags.CrateEspEnabled = Value
 	CrateEspStatus.Text = Value and "scanning..." or "off"
+	if Value and RequestCrateEspScan then
+		RequestCrateEspScan(true)
+	end
 end)
 
 CrateEspToggle:AddColorpicker("crate color", Flags.CrateEspColor, function(Color, Alpha)
@@ -1008,7 +1012,7 @@ CrateTrackDropdown = CrateEspSection:Dropdown(
 		end
 		Flags.CrateEspTrackedNames = SelectedNames
 	end
-):Tooltip("Choose All crates or select the exact discovered crate names you want to track.")
+):Tooltip("Choose All crates or select exact discovered lootable crate types.")
 
 local CrateBoxToggle = CrateEspSection:Toggle("bounding box", true, function(Value)
 	Flags.CrateEspBox = Value
@@ -1033,7 +1037,7 @@ CrateEspSection:Slider("max distance", Flags.CrateEspMaxDistance, 25, 100, 5000,
 end)
 
 CrateEspSection:Label(function()
-	return "status [crate-v2]: " .. CrateEspStatus.Text
+	return "status [loot-only]: " .. CrateEspStatus.Text
 end)
 
 local SettingsTab = Win:AddSettingsTab("cog")
@@ -1811,8 +1815,12 @@ local CrateEspTargets = {}
 local CrateEspLastScan = -math.huge
 local CrateEspRendererFailed = false
 local CrateEspErrorReported = false
-local CRATE_SCAN_INTERVAL = 3
-local CRATE_TARGET_LIMIT = 256
+local CrateEspScanRunning = false
+local CrateEspScanRequested = true
+local CrateEspNextScanAt = 0
+local CRATE_SCAN_INTERVAL = 30
+local CRATE_SCAN_YIELD_EVERY = 250
+local CRATE_TARGET_LIMIT = 96
 
 local CrateNameTokens = {
 	"crate",
@@ -1831,6 +1839,34 @@ local CrateNameTokens = {
 	"itemcase",
 	"cache",
 	"chest",
+}
+
+local ExplicitLootNameTokens = {
+	"lootbox",
+	"lootcrate",
+	"lootable",
+	"stash",
+	"supplydrop",
+	"weaponcase",
+	"ammocase",
+	"medicalcase",
+	"medcase",
+	"lootcase",
+	"itemcase",
+	"cache",
+}
+
+local LootInteractionTokens = {
+	"interact",
+	"proximityprompt",
+	"clickdetector",
+	"loot",
+	"inventory",
+	"contents",
+	"search",
+	"openprompt",
+	"containerdata",
+	"storage",
 }
 
 local function IsInstanceA(Instance, ClassName)
@@ -1873,6 +1909,123 @@ local function IsCrateName(Name)
 		end
 	end
 	return false
+end
+
+local function CompactCrateText(Text)
+	return string.lower(tostring(Text or "")):gsub("[%s_%-%.]", "")
+end
+
+local function ContainsAnyToken(Text, Tokens)
+	local CompactText = CompactCrateText(Text)
+	for _, Token in Tokens do
+		if string.find(CompactText, Token, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function IsExplicitLootName(Name)
+	return ContainsAnyToken(Name, ExplicitLootNameTokens)
+end
+
+local function HasLootAttributes(Instance)
+	local Attributes
+	local Success = pcall(function()
+		Attributes = Instance:GetAttributes()
+	end)
+	if not Success or type(Attributes) ~= "table" then
+		return false
+	end
+
+	for Name in Attributes do
+		if ContainsAnyToken(Name, LootInteractionTokens) then
+			return true
+		end
+	end
+	return false
+end
+
+local function IsLootInteractionMarker(Instance)
+	if IsInstanceA(Instance, "ProximityPrompt") or IsInstanceA(Instance, "ClickDetector") then
+		return true
+	end
+	if ContainsAnyToken(GetInstanceName(Instance), LootInteractionTokens) then
+		return true
+	end
+	return HasLootAttributes(Instance)
+end
+
+local function HasDirectLootSignal(Instance)
+	if not Instance then
+		return false
+	end
+	if IsLootInteractionMarker(Instance) then
+		return true
+	end
+
+	local Children
+	pcall(function()
+		Children = Instance:GetChildren()
+	end)
+	for _, Child in Children or {} do
+		if IsLootInteractionMarker(Child) then
+			return true
+		end
+	end
+	return false
+end
+
+local function HasNestedLootSignal(Instance)
+	if HasDirectLootSignal(Instance) then
+		return true
+	end
+
+	local Descendants
+	pcall(function()
+		Descendants = Instance:GetDescendants()
+	end)
+	for Index, Descendant in Descendants or {} do
+		if Index > 160 then
+			break
+		end
+		if IsLootInteractionMarker(Descendant) then
+			return true
+		end
+	end
+	return false
+end
+
+local function FindLootableCrateRoot(Candidate, TrustedTag)
+	if not Candidate then
+		return nil
+	end
+
+	if IsExplicitLootName(GetInstanceName(Candidate)) or HasNestedLootSignal(Candidate) then
+		return Candidate
+	end
+
+	local Current = GetInstanceParent(Candidate)
+	for _ = 1, 5 do
+		if not Current or Current == Workspace then
+			break
+		end
+		if HasDirectLootSignal(Current) then
+			if IsInstanceA(Current, "Model") or IsInstanceA(Current, "BasePart") then
+				return Current
+			end
+			return Candidate
+		end
+		if IsExplicitLootName(GetInstanceName(Current)) then
+			if IsInstanceA(Current, "Model") or IsInstanceA(Current, "BasePart") then
+				return Current
+			end
+			return Candidate
+		end
+		Current = GetInstanceParent(Current)
+	end
+
+	return TrustedTag and Candidate or nil
 end
 
 local function CleanCrateName(Name)
@@ -2003,19 +2156,29 @@ local function RefreshCrateTargets()
 	local FoundCount = 0
 	local DiscoveredNames = {}
 	local SeenCandidateIdentities = {}
+	local CandidateChecks = 0
 
-	local function AddCandidate(Instance, LabelHint)
+	local function AddCandidate(Instance, LabelHint, TrustedTag)
 		if FoundCount >= CRATE_TARGET_LIMIT then
 			return
 		end
+		CandidateChecks = CandidateChecks + 1
+		if CandidateChecks % 50 == 0 then
+			task.wait()
+		end
 
 		local Candidate = ResolveCrateCandidate(Instance)
-		local Part = FindCratePart(Candidate)
-		if not Candidate or not Part then
+		local LootableRoot = FindLootableCrateRoot(Candidate, TrustedTag)
+		if not Candidate or not LootableRoot then
 			return
 		end
 
-		local Identity = GetInstanceIdentity(Candidate)
+		local Part = FindCratePart(LootableRoot) or FindCratePart(Candidate)
+		if not Part then
+			return
+		end
+
+		local Identity = GetInstanceIdentity(LootableRoot)
 		if SeenCandidateIdentities[Identity] then
 			return
 		end
@@ -2043,7 +2206,8 @@ local function RefreshCrateTargets()
 		end
 
 		FoundTargets[Identity] = {
-			Instance = Candidate,
+			Instance = LootableRoot,
+			SourceInstance = Candidate,
 			Part = Part,
 			DisplayName = DisplayName,
 			AnchorPosition = CandidatePosition,
@@ -2058,8 +2222,8 @@ local function RefreshCrateTargets()
 		Descendants = Workspace:GetDescendants()
 	end)
 	if DescendantsSuccess then
-		for _, Descendant in Descendants or {} do
-			if FoundCount >= CRATE_TARGET_LIMIT then
+		for Index, Descendant in Descendants or {} do
+			if not Flags.Running or FoundCount >= CRATE_TARGET_LIMIT then
 				break
 			end
 
@@ -2071,11 +2235,15 @@ local function RefreshCrateTargets()
 						Children = Descendant:GetChildren()
 					end)
 					for _, Child in Children or {} do
-						AddCandidate(Child, Name)
+						AddCandidate(Child, Name, false)
 					end
 				else
-					AddCandidate(Descendant, Name)
+					AddCandidate(Descendant, Name, false)
 				end
+			end
+
+			if Index % CRATE_SCAN_YIELD_EVERY == 0 then
+				task.wait()
 			end
 		end
 	end
@@ -2096,12 +2264,17 @@ local function RefreshCrateTargets()
 					Tagged = CollectionService:GetTagged(Tag)
 				end)
 				for _, Instance in Tagged or {} do
-					AddCandidate(Instance, Tag)
+					local TrustedTag = IsExplicitLootName(Tag)
+						or ContainsAnyToken(Tag, LootInteractionTokens)
+					AddCandidate(Instance, Tag, TrustedTag)
 				end
 			end
 		end
 	end
 
+	if not Flags.Running then
+		return
+	end
 	CrateEspTargets = FoundTargets
 	local UpdatedChoices = { "All crates" }
 	for Name in DiscoveredNames do
@@ -2118,6 +2291,64 @@ local function RefreshCrateTargets()
 	end)
 	CrateTrackChoices = UpdatedChoices
 end
+
+RequestCrateEspScan = function(Immediate)
+	if not Flags.Running then
+		return
+	end
+
+	if not CrateEspScanRequested then
+		CrateEspNextScanAt = Immediate and 0 or tick() + 0.6
+	elseif Immediate then
+		CrateEspNextScanAt = 0
+	end
+	CrateEspScanRequested = true
+end
+
+local function StartCrateEspScan()
+	if CrateEspScanRunning or not Flags.Running or not Flags.CrateEspEnabled then
+		return
+	end
+
+	CrateEspScanRunning = true
+	CrateEspScanRequested = false
+	CrateEspLastScan = tick()
+	CrateEspStatus.Text = "scanning loot..."
+	task.spawn(function()
+		local ScanSuccess, ScanError = pcall(RefreshCrateTargets)
+		CrateEspScanRunning = false
+		if not Flags.Running then
+			return
+		end
+		if not ScanSuccess then
+			CrateEspStatus.Text = "scan unavailable"
+			if not CrateEspErrorReported then
+				CrateEspErrorReported = true
+				warn("crate ESP scan failed: " .. tostring(ScanError))
+			end
+		else
+			CrateEspErrorReported = false
+		end
+	end)
+end
+
+local function IsRelevantCrateChange(Instance)
+	return IsCrateName(GetInstanceName(Instance))
+		or IsInstanceA(Instance, "ProximityPrompt")
+		or IsInstanceA(Instance, "ClickDetector")
+end
+
+TrackConnection(Workspace.DescendantAdded:Connect(function(Instance)
+	if Flags.CrateEspEnabled and IsRelevantCrateChange(Instance) then
+		RequestCrateEspScan(false)
+	end
+end))
+
+TrackConnection(Workspace.DescendantRemoving:Connect(function(Instance)
+	if Flags.CrateEspEnabled and IsRelevantCrateChange(Instance) then
+		RequestCrateEspScan(false)
+	end
+end))
 
 local function CreateCrateEspBundle()
 	local Bundle = {
@@ -2365,16 +2596,11 @@ local function UpdateCrateEspFrame()
 	end
 
 	local Now = tick()
-	if Now - CrateEspLastScan >= CRATE_SCAN_INTERVAL then
-		CrateEspLastScan = Now
-		local ScanSuccess, ScanError = pcall(RefreshCrateTargets)
-		if not ScanSuccess then
-			CrateEspStatus.Text = "scan unavailable"
-			if not CrateEspErrorReported then
-				CrateEspErrorReported = true
-				warn("crate ESP scan failed: " .. tostring(ScanError))
-			end
-		end
+	if not CrateEspScanRunning and not CrateEspScanRequested and Now - CrateEspLastScan >= CRATE_SCAN_INTERVAL then
+		RequestCrateEspScan(true)
+	end
+	if CrateEspScanRequested and not CrateEspScanRunning and Now >= CrateEspNextScanAt then
+		StartCrateEspScan()
 	end
 
 	local Camera = Workspace.CurrentCamera
@@ -2486,7 +2712,11 @@ local function UpdateCrateEspFrame()
 		end
 	end
 
-	CrateEspStatus.Text = tostring(DrawnCount) .. "/" .. tostring(FoundCount) .. " drawn"
+	CrateEspStatus.Text = tostring(DrawnCount)
+		.. "/"
+		.. tostring(FoundCount)
+		.. " lootable"
+		.. (CrateEspScanRunning and " | scanning" or "")
 end
 
 TrackConnection(RunService.RenderStepped:Connect(function()
