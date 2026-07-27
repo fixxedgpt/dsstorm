@@ -481,28 +481,20 @@ local function AddUiStatusEntrySupport(Source)
 	local OriginalSource = Source
 	local Patches = {
 		{
-			[=[if dU.type=="checkbox"then function ee:AddKeybind]=],
-			[=[if dU.type=="checkbox"then function ee:AddStatus()local eh={statusOnly=true}dU.keybind=eh;aJ[#aJ+1]=dU;return ee end;function ee:AddKeybind]=],
+			[=[if dU.keybind then local eh=dU.keybind;local hq=eh.listening and"..."or aq(eh.value)]=],
+			[=[if dU.keybind then local eh=dU.keybind;local hq=eh.statusOnly and"ON"or eh.listening and"..."or aq(eh.value)]=],
 		},
 		{
-			[=[if dU.keybind then local eh=dU.keybind;local hq=]=],
-			[=[if dU.keybind and not dU.keybind.statusOnly then local eh=dU.keybind;local hq=]=],
-		},
-		{
-			[=[local eS=eh and eh.value and eh.value~=""and dU.value==true;]=],
-			[=[local eS=eh and(eh.statusOnly or eh.value and eh.value~="")and dU.value==true;]=],
+			[=[local jr=D(28,bM(hq,13,aA)+14)j3=j3-jr;local js=iQ and dF(j3,iN+3,jr,20)]=],
+			[=[local jr=D(28,bM(hq,13,aA)+14)j3=j3-jr;local js=not eh.statusOnly and iQ and dF(j3,iN+3,jr,20)]=],
 		},
 		{
 			[=[key=eh and eh.value and aq(eh.value)or""]=],
-			[=[key=eh and not eh.statusOnly and eh.value and aq(eh.value)or""]=],
+			[=[key=eh and eh.statusOnly and"ON"or eh and eh.value and aq(eh.value)or""]=],
 		},
 		{
-			[=[bX(a1.label,bh+22+hx,bW(gh,fU,12),as,12,ax,152,false,false,bj-92,av.text*hw)local Y=a1.key;]=],
-			[=[local Y=a1.key;bX(a1.label,bh+22+hx,bW(gh,fU,12),as,12,ax,152,false,false,Y==""and bj-34 or bj-92,av.text*hw)]=],
-		},
-		{
-			[=[local hy=D(18,bM(Y,11,aA)+12)local hz=bh+bj-10-hy+hx;bg(hz,gh+2,hy,fU-4,as,152,4,av.field*hw)c4(Y,hz+hy/2,gh+fU/2,as,11,aA,153,av.text*hw)]=],
-			[=[if Y~=""then local hy=D(18,bM(Y,11,aA)+12)local hz=bh+bj-10-hy+hx;bg(hz,gh+2,hy,fU-4,as,152,4,av.field*hw)c4(Y,hz+hy/2,gh+fU/2,as,11,aA,153,av.text*hw)end]=],
+			[=[if eh and eh.value and not eh.listening and not e1(dU)then]=],
+			[=[if eh and eh.value and not eh.statusOnly and not eh.listening and not e1(dU)then]=],
 		},
 	}
 
@@ -765,8 +757,9 @@ local AutoPredictionToggle = PredictionSection:Toggle("auto prediction", true, f
 	Flags.AutoPrediction = Value
 end)
 
-if UiStatusEntriesSupported and type(AutoPredictionToggle.AddStatus) == "function" then
-	AutoPredictionToggle:AddStatus()
+if UiStatusEntriesSupported then
+	AutoPredictionToggle:AddKeybind("on", "Always")
+	AutoPredictionToggle.item.keybind.statusOnly = true
 end
 
 local ProjectileSpeedSlider = PredictionSection:Slider(
