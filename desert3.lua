@@ -466,11 +466,64 @@ SilentAim = function(Origin)
 	return PredictTargetPosition(Target, ShotOrigin), Target.TargetPart, Target.Player
 end
 
+local UiStatusEntriesSupported = false
+
+local function ReplacePlainOnce(Source, Original, Replacement)
+	local StartIndex, EndIndex = string.find(Source, Original, 1, true)
+	if not StartIndex then
+		return Source, false
+	end
+
+	return string.sub(Source, 1, StartIndex - 1) .. Replacement .. string.sub(Source, EndIndex + 1), true
+end
+
+local function AddUiStatusEntrySupport(Source)
+	local OriginalSource = Source
+	local Patches = {
+		{
+			[=[if dU.type=="checkbox"then function ee:AddKeybind]=],
+			[=[if dU.type=="checkbox"then function ee:AddStatus()local eh={statusOnly=true}dU.keybind=eh;aJ[#aJ+1]=dU;return ee end;function ee:AddKeybind]=],
+		},
+		{
+			[=[if dU.keybind then local eh=dU.keybind;local hq=]=],
+			[=[if dU.keybind and not dU.keybind.statusOnly then local eh=dU.keybind;local hq=]=],
+		},
+		{
+			[=[local eS=eh and eh.value and eh.value~=""and dU.value==true;]=],
+			[=[local eS=eh and(eh.statusOnly or eh.value and eh.value~="")and dU.value==true;]=],
+		},
+		{
+			[=[key=eh and eh.value and aq(eh.value)or""]=],
+			[=[key=eh and not eh.statusOnly and eh.value and aq(eh.value)or""]=],
+		},
+		{
+			[=[bX(a1.label,bh+22+hx,bW(gh,fU,12),as,12,ax,152,false,false,bj-92,av.text*hw)local Y=a1.key;]=],
+			[=[local Y=a1.key;bX(a1.label,bh+22+hx,bW(gh,fU,12),as,12,ax,152,false,false,Y==""and bj-34 or bj-92,av.text*hw)]=],
+		},
+		{
+			[=[local hy=D(18,bM(Y,11,aA)+12)local hz=bh+bj-10-hy+hx;bg(hz,gh+2,hy,fU-4,as,152,4,av.field*hw)c4(Y,hz+hy/2,gh+fU/2,as,11,aA,153,av.text*hw)]=],
+			[=[if Y~=""then local hy=D(18,bM(Y,11,aA)+12)local hz=bh+bj-10-hy+hx;bg(hz,gh+2,hy,fU-4,as,152,4,av.field*hw)c4(Y,hz+hy/2,gh+fU/2,as,11,aA,153,av.text*hw)end]=],
+		},
+	}
+
+	for PatchIndex, Patch in Patches do
+		local Applied
+		Source, Applied = ReplacePlainOnce(Source, Patch[1], Patch[2])
+		if not Applied then
+			warn("UI status-entry patch " .. tostring(PatchIndex) .. " is unavailable; using the stock UI.")
+			return OriginalSource, false
+		end
+	end
+
+	return Source, true
+end
+
 local function LoadUiLibrary()
 	local Success, Result = pcall(function()
 		local Source = game:HttpGet("https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua")
 		assert(type(Source) == "string" and #Source > 0, "empty UI library response")
 
+		Source, UiStatusEntriesSupported = AddUiStatusEntrySupport(Source)
 		local Chunk = loadstring(Source)
 		assert(type(Chunk) == "function", "UI library compilation failed")
 
@@ -708,9 +761,13 @@ AimProfileDropdown = TargetSection:Dropdown(
 	SetAimProfile
 ):Tooltip("Select one preset, switch directly to another, or click the active preset again to clear it.")
 
-PredictionSection:Toggle("auto prediction", true, function(Value)
+local AutoPredictionToggle = PredictionSection:Toggle("auto prediction", true, function(Value)
 	Flags.AutoPrediction = Value
 end)
+
+if UiStatusEntriesSupported and type(AutoPredictionToggle.AddStatus) == "function" then
+	AutoPredictionToggle:AddStatus()
+end
 
 local ProjectileSpeedSlider = PredictionSection:Slider(
 	"projectile speed",
