@@ -74,6 +74,11 @@ local Flags = {
 	EspTextColor = Color3.fromRGB(235, 235, 235),
 	EspTextAlpha = 1,
 	EspMaxDistance = 2500,
+	CrateEspEnabled = false,
+	CrateEspShowDistance = true,
+	CrateEspColor = Color3.fromRGB(214, 176, 72),
+	CrateEspAlpha = 1,
+	CrateEspMaxDistance = 2000,
 	LockedPlayerName = nil,
 }
 
@@ -86,6 +91,9 @@ local SmoothedAimTargetName
 local EspStatus = {
 	Text = "off",
 	LastError = nil,
+}
+local CrateEspStatus = {
+	Text = "off",
 }
 local SilentAimStatus = {
 	Text = "inactive",
@@ -883,6 +891,7 @@ local EspTab = Win:Tab("ESP", "eye")
 local EspPlayerSection = EspTab:Section("player esp", "Left")
 local EspInfoSection = EspTab:Section("information", "Right")
 local EspRangeSection = EspTab:Section("filtering", "Right")
+local CrateEspSection = EspTab:Section("crate esp", "Left")
 
 EspPlayerSection:Toggle("enabled", false, function(Value)
 	Flags.EspEnabled = Value
@@ -950,6 +959,28 @@ end):Tooltip("Player ESP range in Roblox studs.")
 
 EspRangeSection:Label(function()
 	return "status: " .. EspStatus.Text
+end)
+
+local CrateEspToggle = CrateEspSection:Toggle("enabled", false, function(Value)
+	Flags.CrateEspEnabled = Value
+	CrateEspStatus.Text = Value and "scanning..." or "off"
+end)
+
+CrateEspToggle:AddColorpicker("crate color", Flags.CrateEspColor, function(Color, Alpha)
+	Flags.CrateEspColor = Color
+	Flags.CrateEspAlpha = Alpha
+end)
+
+CrateEspSection:Toggle("distance", true, function(Value)
+	Flags.CrateEspShowDistance = Value
+end)
+
+CrateEspSection:Slider("max distance", Flags.CrateEspMaxDistance, 25, 100, 5000, "u", function(Value)
+	Flags.CrateEspMaxDistance = Value
+end)
+
+CrateEspSection:Label(function()
+	return "status: " .. CrateEspStatus.Text
 end)
 
 local SettingsTab = Win:AddSettingsTab("cog")
@@ -1722,6 +1753,394 @@ local function UpdateEspFrame()
 	end
 end
 
+local CrateEspBundles = {}
+local CrateEspTargets = {}
+local CrateEspLastScan = -math.huge
+local CrateEspRendererFailed = false
+local CrateEspErrorReported = false
+local CRATE_SCAN_INTERVAL = 3
+local CRATE_TARGET_LIMIT = 256
+
+local CrateNameTokens = {
+	"crate",
+	"stash",
+	"container",
+	"lootbox",
+	"lootcrate",
+	"lootable",
+	"supplybox",
+	"supplydrop",
+	"weaponcase",
+	"ammocase",
+	"medicalcase",
+	"medcase",
+	"lootcase",
+	"itemcase",
+	"cache",
+	"chest",
+}
+
+local function IsInstanceA(Instance, ClassName)
+	local Result = false
+	pcall(function()
+		Result = Instance and Instance:IsA(ClassName)
+	end)
+	return Result
+end
+
+local function GetInstanceName(Instance)
+	local Name
+	pcall(function()
+		Name = Instance and Instance.Name
+	end)
+	return type(Name) == "string" and Name or nil
+end
+
+local function GetInstanceParent(Instance)
+	local Parent
+	pcall(function()
+		Parent = Instance and Instance.Parent
+	end)
+	return Parent
+end
+
+local function IsCrateName(Name)
+	if type(Name) ~= "string" or Name == "" then
+		return false
+	end
+
+	local CompactName = string.lower(Name):gsub("[%s_%-%.]", "")
+	if string.find(CompactName, "template", 1, true) or string.find(CompactName, "spawner", 1, true) then
+		return false
+	end
+
+	for _, Token in CrateNameTokens do
+		if string.find(CompactName, Token, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function CleanCrateName(Name)
+	Name = tostring(Name or "Crate")
+	Name = Name:gsub("[_%-]+", " "):gsub("%s+", " ")
+	if string.lower(Name) == "crates" then
+		return "Crate"
+	end
+	if string.lower(Name) == "containers" then
+		return "Container"
+	end
+	return Name
+end
+
+local function HasHumanoidAncestor(Instance)
+	local Current = Instance
+	for _ = 1, 6 do
+		if not Current then
+			break
+		end
+		if SafeFindFirstChild(Current, "Humanoid") then
+			return true
+		end
+		Current = GetInstanceParent(Current)
+	end
+	return false
+end
+
+local function ResolveCrateCandidate(Instance)
+	if not Instance then
+		return nil
+	end
+
+	local Candidate = Instance
+	if not IsInstanceA(Candidate, "Model") and not IsInstanceA(Candidate, "BasePart") then
+		for _ = 1, 6 do
+			Candidate = GetInstanceParent(Candidate)
+			if not Candidate then
+				return nil
+			end
+			if IsInstanceA(Candidate, "Model") or IsInstanceA(Candidate, "BasePart") then
+				break
+			end
+		end
+	end
+
+	if IsInstanceA(Candidate, "BasePart") then
+		local Parent = GetInstanceParent(Candidate)
+		if Parent and IsInstanceA(Parent, "Model") then
+			Candidate = Parent
+		end
+	end
+
+	if HasHumanoidAncestor(Candidate) then
+		return nil
+	end
+	return Candidate
+end
+
+local function FindCratePart(Instance)
+	if not Instance then
+		return nil
+	end
+	if IsInstanceA(Instance, "BasePart") then
+		return Instance
+	end
+
+	local Part
+	pcall(function()
+		Part = Instance.PrimaryPart
+	end)
+	if Part then
+		return Part
+	end
+
+	for _, PartName in { "Main", "Root", "Handle", "Primary", "Base" } do
+		Part = SafeFindFirstChild(Instance, PartName)
+		if Part and IsInstanceA(Part, "BasePart") then
+			return Part
+		end
+	end
+
+	pcall(function()
+		Part = Instance:FindFirstChildWhichIsA("BasePart", true)
+	end)
+	if Part then
+		return Part
+	end
+
+	local Descendants
+	pcall(function()
+		Descendants = Instance:GetDescendants()
+	end)
+	for _, Descendant in Descendants or {} do
+		if IsInstanceA(Descendant, "BasePart") then
+			return Descendant
+		end
+	end
+	return nil
+end
+
+local function RefreshCrateTargets()
+	local FoundTargets = {}
+	local FoundCount = 0
+
+	local function AddCandidate(Instance, LabelHint)
+		if FoundCount >= CRATE_TARGET_LIMIT then
+			return
+		end
+
+		local Candidate = ResolveCrateCandidate(Instance)
+		local Part = FindCratePart(Candidate)
+		if not Candidate or not Part then
+			return
+		end
+
+		local Identity = GetInstanceIdentity(Candidate)
+		if FoundTargets[Identity] then
+			return
+		end
+
+		local CandidateName = GetInstanceName(Candidate)
+		FoundTargets[Identity] = {
+			Instance = Candidate,
+			Part = Part,
+			DisplayName = CleanCrateName(IsCrateName(CandidateName) and CandidateName or LabelHint),
+		}
+		FoundCount = FoundCount + 1
+	end
+
+	local Descendants
+	local DescendantsSuccess = pcall(function()
+		Descendants = Workspace:GetDescendants()
+	end)
+	if DescendantsSuccess then
+		for _, Descendant in Descendants or {} do
+			if FoundCount >= CRATE_TARGET_LIMIT then
+				break
+			end
+
+			local Name = GetInstanceName(Descendant)
+			if IsCrateName(Name) then
+				if IsInstanceA(Descendant, "Folder") then
+					local Children
+					pcall(function()
+						Children = Descendant:GetChildren()
+					end)
+					for _, Child in Children or {} do
+						AddCandidate(Child, Name)
+					end
+				else
+					AddCandidate(Descendant, Name)
+				end
+			end
+		end
+	end
+
+	local CollectionService
+	pcall(function()
+		CollectionService = game:GetService("CollectionService")
+	end)
+	if CollectionService and FoundCount < CRATE_TARGET_LIMIT then
+		local Tags
+		pcall(function()
+			Tags = CollectionService:GetTags()
+		end)
+		for _, Tag in Tags or {} do
+			if IsCrateName(Tag) then
+				local Tagged
+				pcall(function()
+					Tagged = CollectionService:GetTagged(Tag)
+				end)
+				for _, Instance in Tagged or {} do
+					AddCandidate(Instance, Tag)
+				end
+			end
+		end
+	end
+
+	CrateEspTargets = FoundTargets
+end
+
+local function CreateCrateEspBundle()
+	local Bundle = {
+		Label = CreateDrawingObject("Text"),
+	}
+	if not Bundle.Label then
+		assert(false, "Matcha rejected crate Text drawings")
+	end
+
+	SetTextDefaults(Bundle.Label, true)
+	SetDrawingProperty(Bundle.Label, "FontSize", 13)
+	SetDrawingProperty(Bundle.Label, "ZIndex", 15)
+	return Bundle
+end
+
+local function HideCrateEspBundle(Bundle)
+	if Bundle and Bundle.Label then
+		Bundle.Label.Visible = false
+	end
+end
+
+local function HideAllCrateEspBundles()
+	for _, Bundle in CrateEspBundles do
+		HideCrateEspBundle(Bundle)
+	end
+end
+
+local function GetCrateEspBundle(Identity)
+	local Bundle = CrateEspBundles[Identity]
+	if Bundle then
+		return Bundle
+	end
+	if CrateEspRendererFailed then
+		return nil
+	end
+
+	local Success, Result = pcall(CreateCrateEspBundle)
+	if not Success then
+		CrateEspRendererFailed = true
+		CrateEspStatus.Text = "renderer unavailable"
+		if not CrateEspErrorReported then
+			CrateEspErrorReported = true
+			warn("crate ESP drawing creation failed: " .. tostring(Result))
+		end
+		return nil
+	end
+
+	CrateEspBundles[Identity] = Result
+	return Result
+end
+
+local function UpdateCrateEspFrame()
+	if not Flags.Running or not Flags.CrateEspEnabled then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "off"
+		return
+	end
+	if CrateEspRendererFailed then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "renderer unavailable"
+		return
+	end
+
+	local Now = tick()
+	if Now - CrateEspLastScan >= CRATE_SCAN_INTERVAL then
+		CrateEspLastScan = Now
+		local ScanSuccess, ScanError = pcall(RefreshCrateTargets)
+		if not ScanSuccess then
+			CrateEspStatus.Text = "scan unavailable"
+			if not CrateEspErrorReported then
+				CrateEspErrorReported = true
+				warn("crate ESP scan failed: " .. tostring(ScanError))
+			end
+		end
+	end
+
+	local Camera = Workspace.CurrentCamera
+	if not Camera then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "waiting for camera"
+		return
+	end
+
+	local Origin = GetPartPosition(GetLocalRoot())
+	if not Origin then
+		pcall(function()
+			Origin = Camera.Position
+		end)
+	end
+	if not Origin then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "waiting for position"
+		return
+	end
+
+	local FoundCount = 0
+	local DrawnCount = 0
+	local ActiveBundles = {}
+	for Identity, Target in CrateEspTargets do
+		FoundCount = FoundCount + 1
+		local Part = Target.Part
+		local Position = GetPartPosition(Part)
+		if not Position then
+			Part = FindCratePart(Target.Instance)
+			Target.Part = Part
+			Position = GetPartPosition(Part)
+		end
+		if Position then
+			local Distance = (Origin - Position).Magnitude
+			if Distance <= Flags.CrateEspMaxDistance then
+				local ScreenPosition, OnScreen = ProjectToScreen(Position + Vector3.new(0, 1.25, 0))
+				if OnScreen and ScreenPosition then
+					local Bundle = GetCrateEspBundle(Identity)
+					if Bundle and Bundle.Label then
+						local Text = Target.DisplayName or "Crate"
+						if Flags.CrateEspShowDistance then
+							Text = Text .. "  [" .. tostring(math.floor(Distance + 0.5)) .. "u]"
+						end
+						Bundle.Label.Text = Text
+						Bundle.Label.Position = ScreenPosition
+						Bundle.Label.Color = Flags.CrateEspColor
+						Bundle.Label.Transparency = Flags.CrateEspAlpha
+						Bundle.Label.Visible = true
+						ActiveBundles[Bundle] = true
+						DrawnCount = DrawnCount + 1
+					end
+				end
+			end
+		end
+	end
+
+	for _, Bundle in CrateEspBundles do
+		if not ActiveBundles[Bundle] then
+			HideCrateEspBundle(Bundle)
+		end
+	end
+
+	CrateEspStatus.Text = tostring(DrawnCount) .. "/" .. tostring(FoundCount) .. " drawn"
+end
+
 TrackConnection(RunService.RenderStepped:Connect(function()
 	if not Flags.Running then
 		return
@@ -1730,6 +2149,16 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 	local Success, ErrorMessage = pcall(UpdateEspFrame)
 	if not Success then
 		ReportEspError("ESP frame failed", ErrorMessage)
+	end
+
+	local CrateSuccess, CrateError = pcall(UpdateCrateEspFrame)
+	if not CrateSuccess then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "update unavailable"
+		if not CrateEspErrorReported then
+			CrateEspErrorReported = true
+			warn("crate ESP update failed: " .. tostring(CrateError))
+		end
 	end
 end))
 
