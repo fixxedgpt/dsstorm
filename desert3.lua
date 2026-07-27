@@ -665,35 +665,32 @@ local AimProfiles = {
 	},
 }
 
-TargetSection:Label("profiles")
-
-local ProfileToggles = {}
 local UpdatingAimProfile = false
+local AimProfileDropdown
 
-local function SetAimProfile(ProfileName, Enabled)
+local function SetAimProfile(Value)
 	if UpdatingAimProfile then
 		return
 	end
 
-	if not Enabled then
-		if Flags.AimProfile == ProfileName then
-			Flags.AimProfile = nil
-		end
+	if type(Value) ~= "table" or #Value == 0 then
+		Flags.AimProfile = nil
 		return
+	end
+
+	-- Multi-select mode gives the dropdown its checkable appearance and permits
+	-- clearing it. If another preset is clicked, keep only that newest choice.
+	local ProfileName = Value[#Value]
+	if #Value > 1 and AimProfileDropdown then
+		UpdatingAimProfile = true
+		AimProfileDropdown:Set({ ProfileName })
+		UpdatingAimProfile = false
 	end
 
 	local Profile = AimProfiles[ProfileName]
 	if not Profile then
 		return
 	end
-
-	UpdatingAimProfile = true
-	for OtherName, Toggle in ProfileToggles do
-		if OtherName ~= ProfileName and Toggle:Get() then
-			Toggle:Set(false)
-		end
-	end
-	UpdatingAimProfile = false
 
 	Flags.AimProfile = ProfileName
 	FovRadiusSlider:Set(Profile.FovRadius)
@@ -703,33 +700,17 @@ local function SetAimProfile(ProfileName, Enabled)
 	ClearLock()
 end
 
-ProfileToggles.Rifles = TargetSection:Toggle("Rifles", true, function(Value)
-	SetAimProfile("Rifles", Value)
-end)
+AimProfileDropdown = TargetSection:Dropdown(
+	"profiles",
+	{ Flags.AimProfile },
+	{ "Rifles", "Sniper", "Hybrid" },
+	true,
+	SetAimProfile
+):Tooltip("Select one preset, switch directly to another, or click the active preset again to clear it.")
 
-ProfileToggles.Sniper = TargetSection:Toggle("Sniper", false, function(Value)
-	SetAimProfile("Sniper", Value)
-end)
-
-ProfileToggles.Hybrid = TargetSection:Toggle("Hybrid", false, function(Value)
-	SetAimProfile("Hybrid", Value)
-end)
-
-local AutoPredictionOverlay
-local AutoPredictionToggle = PredictionSection:Toggle("auto prediction", true, function(Value)
+PredictionSection:Toggle("auto prediction", true, function(Value)
 	Flags.AutoPrediction = Value
-	if AutoPredictionOverlay and AutoPredictionOverlay:Get() ~= Value then
-		AutoPredictionOverlay:Set(Value)
-	end
 end)
-
--- INS-ui's overlay normally requires a visible bind control. This hidden,
--- non-configurable status row mirrors the checkbox and contributes only an
--- "ON" state to the keybind overlay.
-AutoPredictionOverlay = PredictionSection:Toggle("auto prediction", Flags.AutoPrediction, function() end)
-AutoPredictionOverlay.item.noSave = true
-AutoPredictionOverlay:DependsOn({ item = { value = false } })
-AutoPredictionOverlay:AddKeybind("on", "Always")
 
 local ProjectileSpeedSlider = PredictionSection:Slider(
 	"projectile speed",
