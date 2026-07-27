@@ -69,7 +69,6 @@ local Flags = {
 	EspTextColor = Color3.fromRGB(235, 235, 235),
 	EspTextAlpha = 1,
 	EspMaxDistance = 2500,
-	EspRefreshRate = 90,
 	LockedPlayerName = nil,
 }
 
@@ -753,10 +752,6 @@ EspRangeSection:Slider("max distance", Flags.EspMaxDistance, 25, 100, 5000, "u",
 	Flags.EspMaxDistance = Value
 end):Tooltip("Player ESP range in Roblox studs.")
 
-EspRangeSection:Slider("refresh rate", Flags.EspRefreshRate, 5, 30, 144, "hz", function(Value)
-	Flags.EspRefreshRate = Value
-end):Tooltip("Lower this if the menu or game becomes slow while ESP is enabled.")
-
 EspRangeSection:Label(function()
 	return "status: " .. EspStatus.Text
 end)
@@ -796,6 +791,36 @@ local EspWeaponCache = {}
 local EspErrorReported = false
 local EspRendererFailed = false
 local EspSkippedProperties = {}
+
+local function GetInstanceIdentity(Instance)
+	local Address
+	pcall(function()
+		Address = Instance and Instance.Address
+	end)
+	if type(Address) == "number" and Address > 0 then
+		return tostring(Address)
+	end
+
+	local FullName
+	pcall(function()
+		FullName = Instance and Instance:GetFullName()
+	end)
+	if FullName and FullName ~= "" then
+		return FullName
+	end
+	return tostring(Instance)
+end
+
+local function GetPlayerIdentity(Player)
+	local PlayerName
+	pcall(function()
+		PlayerName = Player and Player.Name
+	end)
+	if PlayerName and PlayerName ~= "" then
+		return PlayerName
+	end
+	return GetInstanceIdentity(Player)
+end
 
 local function ReportEspError(Prefix, ErrorMessage)
 	local FullMessage = Prefix .. ": " .. tostring(ErrorMessage)
@@ -992,7 +1017,8 @@ local function SetEspBoxLines(Lines, X, Y, Width, Height, Color, Alpha)
 end
 
 local function GetEspBundle(Player)
-	local Bundle = EspBundles[Player]
+	local PlayerIdentity = GetPlayerIdentity(Player)
+	local Bundle = EspBundles[PlayerIdentity]
 	if not Bundle then
 		if EspRendererFailed then
 			return nil
@@ -1006,7 +1032,8 @@ local function GetEspBundle(Player)
 		end
 
 		Bundle = Result
-		EspBundles[Player] = Bundle
+		Bundle.PlayerIdentity = PlayerIdentity
+		EspBundles[PlayerIdentity] = Bundle
 	end
 	return Bundle
 end
@@ -1031,10 +1058,11 @@ local function GetHeldWeaponName(Character)
 	end
 
 	for _, Child in Children do
-		local Success, IsTool = pcall(function()
-			return Child:IsA("Tool")
+		local ClassName
+		pcall(function()
+			ClassName = Child.ClassName
 		end)
-		if Success and IsTool then
+		if ClassName == "Tool" then
 			return Child.Name
 		end
 	end
@@ -1043,13 +1071,14 @@ end
 
 local function GetCachedWeaponName(Character)
 	local Now = tick()
-	local Cached = EspWeaponCache[Character]
+	local CharacterIdentity = GetInstanceIdentity(Character)
+	local Cached = EspWeaponCache[CharacterIdentity]
 	if Cached and Now < Cached.ExpiresAt then
 		return Cached.Name
 	end
 
 	local WeaponName = GetHeldWeaponName(Character)
-	EspWeaponCache[Character] = {
+	EspWeaponCache[CharacterIdentity] = {
 		Name = WeaponName,
 		ExpiresAt = Now + 0.25,
 	}
@@ -1156,23 +1185,29 @@ local function ResolveEspCharacter(Character)
 end
 
 local function GetEspTarget(Player)
-	if not Player or Player == LocalPlayer or IsEspTeammate(Player) then
+	if not Player then
+		return nil
+	end
+
+	local PlayerIdentity = GetPlayerIdentity(Player)
+	if PlayerIdentity == GetPlayerIdentity(LocalPlayer) or IsEspTeammate(Player) then
 		return nil
 	end
 
 	local Character = GetPlayerCharacter(Player)
 	if not Character then
-		EspTargetCache[Player] = nil
+		EspTargetCache[PlayerIdentity] = nil
 		return nil
 	end
 
 	local Now = tick()
-	local Cached = EspTargetCache[Player]
+	local CharacterIdentity = GetInstanceIdentity(Character)
+	local Cached = EspTargetCache[PlayerIdentity]
 	local Humanoid
 	local Head
 	local RootPart
 
-	if Cached and Cached.Character == Character and Now < Cached.ExpiresAt then
+	if Cached and Cached.CharacterIdentity == CharacterIdentity and Now < Cached.ExpiresAt then
 		Humanoid = Cached.Humanoid
 		Head = Cached.Head
 		RootPart = Cached.RootPart
@@ -1186,20 +1221,21 @@ local function GetEspTarget(Player)
 		end)
 		Cached = {
 			Character = Character,
+			CharacterIdentity = CharacterIdentity,
 			Humanoid = Humanoid,
 			Head = Head,
 			RootPart = RootPart,
 			DisplayName = DisplayName,
 			ExpiresAt = Now + 0.75,
 		}
-		EspTargetCache[Player] = Cached
+		EspTargetCache[PlayerIdentity] = Cached
 	end
 
 	if not RootPart or not Head then
 		return nil
 	end
 	if not GetPartPosition(Head) or not GetPartPosition(RootPart) then
-		EspTargetCache[Player] = nil
+		EspTargetCache[PlayerIdentity] = nil
 		return nil
 	end
 
@@ -1441,8 +1477,9 @@ local function UpdateEspFrame()
 	local ValidCount = 0
 	local DrawnCount = 0
 	local ActiveBundles = {}
+	local LocalPlayerIdentity = GetPlayerIdentity(LocalPlayer)
 	for _, Player in Players:GetPlayers() do
-		if Player ~= LocalPlayer then
+		if GetPlayerIdentity(Player) ~= LocalPlayerIdentity then
 			PlayerCount = PlayerCount + 1
 		end
 
@@ -1489,19 +1526,10 @@ local function UpdateEspFrame()
 	end
 end
 
-local EspLastUpdateAt = -math.huge
-
 TrackConnection(RunService.RenderStepped:Connect(function()
 	if not Flags.Running then
 		return
 	end
-
-	local Now = tick()
-	local RefreshInterval = 1 / math.max(Flags.EspRefreshRate, 30)
-	if Now - EspLastUpdateAt < RefreshInterval then
-		return
-	end
-	EspLastUpdateAt = Now
 
 	local Success, ErrorMessage = pcall(UpdateEspFrame)
 	if not Success then
