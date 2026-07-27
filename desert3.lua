@@ -75,6 +75,9 @@ local Flags = {
 	EspTextAlpha = 1,
 	EspMaxDistance = 2500,
 	CrateEspEnabled = false,
+	CrateEspTrackedNames = { "All crates" },
+	CrateEspBox = true,
+	CrateEspBoxStyle = "Corners",
 	CrateEspShowDistance = true,
 	CrateEspColor = Color3.fromRGB(214, 176, 72),
 	CrateEspAlpha = 1,
@@ -95,6 +98,7 @@ local EspStatus = {
 local CrateEspStatus = {
 	Text = "off",
 }
+local CrateTrackChoices = { "All crates" }
 local SilentAimStatus = {
 	Text = "inactive",
 }
@@ -970,6 +974,55 @@ CrateEspToggle:AddColorpicker("crate color", Flags.CrateEspColor, function(Color
 	Flags.CrateEspColor = Color
 	Flags.CrateEspAlpha = Alpha
 end)
+
+local CrateTrackDropdown
+local UpdatingCrateTrackSelection = false
+CrateTrackDropdown = CrateEspSection:Dropdown(
+	"track crates",
+	Flags.CrateEspTrackedNames,
+	function()
+		return CrateTrackChoices
+	end,
+	true,
+	function(Value)
+		if UpdatingCrateTrackSelection then
+			return
+		end
+
+		local SelectedNames = {}
+		local NewestName = Value[#Value]
+		if NewestName == "All crates" then
+			SelectedNames[1] = "All crates"
+		else
+			for _, Name in Value do
+				if Name ~= "All crates" then
+					SelectedNames[#SelectedNames + 1] = Name
+				end
+			end
+		end
+
+		if #SelectedNames ~= #Value then
+			UpdatingCrateTrackSelection = true
+			CrateTrackDropdown:Set(SelectedNames)
+			UpdatingCrateTrackSelection = false
+		end
+		Flags.CrateEspTrackedNames = SelectedNames
+	end
+):Tooltip("Choose All crates or select the exact discovered crate names you want to track.")
+
+local CrateBoxToggle = CrateEspSection:Toggle("bounding box", true, function(Value)
+	Flags.CrateEspBox = Value
+end)
+
+CrateEspSection:Dropdown(
+	"box style",
+	{ Flags.CrateEspBoxStyle },
+	{ "Corners", "Full" },
+	false,
+	function(Value)
+		Flags.CrateEspBoxStyle = Value[1] or "Corners"
+	end
+):DependsOn(CrateBoxToggle)
 
 CrateEspSection:Toggle("distance", true, function(Value)
 	Flags.CrateEspShowDistance = Value
@@ -1924,6 +1977,7 @@ end
 local function RefreshCrateTargets()
 	local FoundTargets = {}
 	local FoundCount = 0
+	local DiscoveredNames = {}
 
 	local function AddCandidate(Instance, LabelHint)
 		if FoundCount >= CRATE_TARGET_LIMIT then
@@ -1942,11 +1996,13 @@ local function RefreshCrateTargets()
 		end
 
 		local CandidateName = GetInstanceName(Candidate)
+		local DisplayName = CleanCrateName(IsCrateName(CandidateName) and CandidateName or LabelHint)
 		FoundTargets[Identity] = {
 			Instance = Candidate,
 			Part = Part,
-			DisplayName = CleanCrateName(IsCrateName(CandidateName) and CandidateName or LabelHint),
+			DisplayName = DisplayName,
 		}
+		DiscoveredNames[DisplayName] = true
 		FoundCount = FoundCount + 1
 	end
 
@@ -2000,12 +2056,48 @@ local function RefreshCrateTargets()
 	end
 
 	CrateEspTargets = FoundTargets
+	local UpdatedChoices = { "All crates" }
+	for Name in DiscoveredNames do
+		UpdatedChoices[#UpdatedChoices + 1] = Name
+	end
+	table.sort(UpdatedChoices, function(Left, Right)
+		if Left == "All crates" then
+			return true
+		end
+		if Right == "All crates" then
+			return false
+		end
+		return string.lower(Left) < string.lower(Right)
+	end)
+	CrateTrackChoices = UpdatedChoices
 end
 
 local function CreateCrateEspBundle()
 	local Bundle = {
 		Label = CreateDrawingObject("Text"),
+		Box = {},
+		BoxOutline = {},
 	}
+
+	for _ = 1, 8 do
+		local OutlineLine = CreateDrawingObject("Line")
+		if OutlineLine then
+			SetDrawingProperty(OutlineLine, "Thickness", 3)
+			SetDrawingProperty(OutlineLine, "Color", Color3.fromRGB(0, 0, 0))
+			SetDrawingProperty(OutlineLine, "Visible", false)
+			SetDrawingProperty(OutlineLine, "ZIndex", 13)
+			Bundle.BoxOutline[#Bundle.BoxOutline + 1] = OutlineLine
+		end
+
+		local BoxLine = CreateDrawingObject("Line")
+		if BoxLine then
+			SetDrawingProperty(BoxLine, "Thickness", 1)
+			SetDrawingProperty(BoxLine, "Visible", false)
+			SetDrawingProperty(BoxLine, "ZIndex", 14)
+			Bundle.Box[#Bundle.Box + 1] = BoxLine
+		end
+	end
+
 	if not Bundle.Label then
 		assert(false, "Matcha rejected crate Text drawings")
 	end
@@ -2017,8 +2109,17 @@ local function CreateCrateEspBundle()
 end
 
 local function HideCrateEspBundle(Bundle)
-	if Bundle and Bundle.Label then
+	if not Bundle then
+		return
+	end
+	if Bundle.Label then
 		Bundle.Label.Visible = false
+	end
+	for _, Line in Bundle.BoxOutline do
+		Line.Visible = false
+	end
+	for _, Line in Bundle.Box do
+		Line.Visible = false
 	end
 end
 
@@ -2050,6 +2151,133 @@ local function GetCrateEspBundle(Identity)
 
 	CrateEspBundles[Identity] = Result
 	return Result
+end
+
+local function ShouldTrackCrate(DisplayName)
+	local SelectedNames = Flags.CrateEspTrackedNames
+	if type(SelectedNames) ~= "table" or #SelectedNames == 0 then
+		return false
+	end
+
+	for _, SelectedName in SelectedNames do
+		if SelectedName == "All crates" or SelectedName == DisplayName then
+			return true
+		end
+	end
+	return false
+end
+
+local function GetCrateScreenBox(Target, Distance)
+	local Part = Target.Part or FindCratePart(Target.Instance)
+	if not Part then
+		return nil
+	end
+
+	local BoundsCFrame
+	local BoundsSize
+	pcall(function()
+		if IsInstanceA(Target.Instance, "Model") then
+			BoundsCFrame, BoundsSize = Target.Instance:GetBoundingBox()
+		end
+	end)
+	if not BoundsCFrame or not BoundsSize then
+		pcall(function()
+			BoundsCFrame = Part.CFrame
+			BoundsSize = Part.Size
+		end)
+	end
+
+	local MinimumX = math.huge
+	local MinimumY = math.huge
+	local MaximumX = -math.huge
+	local MaximumY = -math.huge
+	local ProjectedCount = 0
+	local AnyOnScreen = false
+
+	if BoundsCFrame and BoundsSize then
+		for XSign = -1, 1, 2 do
+			for YSign = -1, 1, 2 do
+				for ZSign = -1, 1, 2 do
+					local WorldPosition
+					pcall(function()
+						WorldPosition = BoundsCFrame
+							* Vector3.new(
+								BoundsSize.X * 0.5 * XSign,
+								BoundsSize.Y * 0.5 * YSign,
+								BoundsSize.Z * 0.5 * ZSign
+							)
+					end)
+					if WorldPosition then
+						local ScreenPosition, OnScreen = ProjectToScreen(WorldPosition)
+						if ScreenPosition then
+							ProjectedCount = ProjectedCount + 1
+							AnyOnScreen = AnyOnScreen or OnScreen
+							MinimumX = math.min(MinimumX, ScreenPosition.X)
+							MinimumY = math.min(MinimumY, ScreenPosition.Y)
+							MaximumX = math.max(MaximumX, ScreenPosition.X)
+							MaximumY = math.max(MaximumY, ScreenPosition.Y)
+						end
+					end
+				end
+			end
+		end
+	end
+
+	if ProjectedCount >= 2 and AnyOnScreen then
+		local Width = MaximumX - MinimumX
+		local Height = MaximumY - MinimumY
+		if Width >= 3 and Height >= 3 and Width < 2000 and Height < 2000 then
+			return MinimumX, MinimumY, Width, Height
+		end
+	end
+
+	local Position = GetPartPosition(Part)
+	local ScreenPosition, OnScreen = ProjectToScreen(Position)
+	if not ScreenPosition or not OnScreen then
+		return nil
+	end
+	local Height = Clamp(1100 / math.max(Distance, 1), 12, 70)
+	local Width = Height * 1.25
+	return ScreenPosition.X - Width * 0.5, ScreenPosition.Y - Height * 0.5, Width, Height
+end
+
+local function BuildFullBoxSegments(X, Y, Width, Height)
+	return {
+		{ Vector2.new(X, Y), Vector2.new(X + Width, Y) },
+		{ Vector2.new(X + Width, Y), Vector2.new(X + Width, Y + Height) },
+		{ Vector2.new(X + Width, Y + Height), Vector2.new(X, Y + Height) },
+		{ Vector2.new(X, Y + Height), Vector2.new(X, Y) },
+	}
+end
+
+local function BuildCornerBoxSegments(X, Y, Width, Height)
+	local CornerLength = math.max(math.min(Width, Height) * 0.28, 4)
+	CornerLength = math.min(CornerLength, Width * 0.5, Height * 0.5)
+	return {
+		{ Vector2.new(X, Y), Vector2.new(X + CornerLength, Y) },
+		{ Vector2.new(X, Y), Vector2.new(X, Y + CornerLength) },
+		{ Vector2.new(X + Width - CornerLength, Y), Vector2.new(X + Width, Y) },
+		{ Vector2.new(X + Width, Y), Vector2.new(X + Width, Y + CornerLength) },
+		{ Vector2.new(X, Y + Height), Vector2.new(X + CornerLength, Y + Height) },
+		{ Vector2.new(X, Y + Height - CornerLength), Vector2.new(X, Y + Height) },
+		{ Vector2.new(X + Width - CornerLength, Y + Height), Vector2.new(X + Width, Y + Height) },
+		{ Vector2.new(X + Width, Y + Height - CornerLength), Vector2.new(X + Width, Y + Height) },
+	}
+end
+
+local function SetCrateBoxSegments(Lines, Segments, Color, Alpha)
+	for Index, Line in Lines do
+		local Segment = Segments[Index]
+		if Segment then
+			Line.From = Segment[1]
+			Line.To = Segment[2]
+			Line.Color = Color
+			Line.Transparency = Alpha
+			Line.Visible = true
+		else
+			Line.Visible = false
+		end
+	end
 end
 
 local function UpdateCrateEspFrame()
@@ -2101,31 +2329,71 @@ local function UpdateCrateEspFrame()
 	local ActiveBundles = {}
 	for Identity, Target in CrateEspTargets do
 		FoundCount = FoundCount + 1
-		local Part = Target.Part
-		local Position = GetPartPosition(Part)
-		if not Position then
-			Part = FindCratePart(Target.Instance)
-			Target.Part = Part
-			Position = GetPartPosition(Part)
-		end
-		if Position then
-			local Distance = (Origin - Position).Magnitude
-			if Distance <= Flags.CrateEspMaxDistance then
-				local ScreenPosition, OnScreen = ProjectToScreen(Position + Vector3.new(0, 1.25, 0))
-				if OnScreen and ScreenPosition then
-					local Bundle = GetCrateEspBundle(Identity)
-					if Bundle and Bundle.Label then
-						local Text = Target.DisplayName or "Crate"
-						if Flags.CrateEspShowDistance then
-							Text = Text .. "  [" .. tostring(math.floor(Distance + 0.5)) .. "u]"
+		if ShouldTrackCrate(Target.DisplayName) then
+			local Part = Target.Part
+			local Position = GetPartPosition(Part)
+			if not Position then
+				Part = FindCratePart(Target.Instance)
+				Target.Part = Part
+				Position = GetPartPosition(Part)
+			end
+			if Position then
+				local Distance = (Origin - Position).Magnitude
+				if Distance <= Flags.CrateEspMaxDistance then
+					local ScreenPosition, OnScreen = ProjectToScreen(Position + Vector3.new(0, 1.25, 0))
+					if OnScreen and ScreenPosition then
+						local Bundle = GetCrateEspBundle(Identity)
+						if Bundle and Bundle.Label then
+							local BoxX
+							local BoxY
+							local BoxWidth
+							local BoxHeight
+							if Flags.CrateEspBox then
+								BoxX, BoxY, BoxWidth, BoxHeight = GetCrateScreenBox(Target, Distance)
+							end
+
+							if BoxX then
+								local Segments
+								if Flags.CrateEspBoxStyle == "Full" then
+									Segments = BuildFullBoxSegments(BoxX, BoxY, BoxWidth, BoxHeight)
+								else
+									Segments = BuildCornerBoxSegments(BoxX, BoxY, BoxWidth, BoxHeight)
+								end
+								SetCrateBoxSegments(
+									Bundle.BoxOutline,
+									Segments,
+									Color3.fromRGB(0, 0, 0),
+									Flags.CrateEspAlpha
+								)
+								SetCrateBoxSegments(
+									Bundle.Box,
+									Segments,
+									Flags.CrateEspColor,
+									Flags.CrateEspAlpha
+								)
+							else
+								for _, Line in Bundle.BoxOutline do
+									Line.Visible = false
+								end
+								for _, Line in Bundle.Box do
+									Line.Visible = false
+								end
+							end
+
+							local Text = Target.DisplayName or "Crate"
+							if Flags.CrateEspShowDistance then
+								Text = Text .. "  [" .. tostring(math.floor(Distance + 0.5)) .. "u]"
+							end
+							Bundle.Label.Text = Text
+							Bundle.Label.Position = BoxX
+									and Vector2.new(BoxX + BoxWidth * 0.5, BoxY - 15)
+								or ScreenPosition
+							Bundle.Label.Color = Flags.CrateEspColor
+							Bundle.Label.Transparency = Flags.CrateEspAlpha
+							Bundle.Label.Visible = true
+							ActiveBundles[Bundle] = true
+							DrawnCount = DrawnCount + 1
 						end
-						Bundle.Label.Text = Text
-						Bundle.Label.Position = ScreenPosition
-						Bundle.Label.Color = Flags.CrateEspColor
-						Bundle.Label.Transparency = Flags.CrateEspAlpha
-						Bundle.Label.Visible = true
-						ActiveBundles[Bundle] = true
-						DrawnCount = DrawnCount + 1
 					end
 				end
 			end
