@@ -1878,6 +1878,17 @@ end
 local function CleanCrateName(Name)
 	Name = tostring(Name or "Crate")
 	Name = Name:gsub("[_%-]+", " "):gsub("%s+", " ")
+	local LowerName = string.lower(Name)
+	local AssetSuffix = string.find(LowerName, " palette", 1, true)
+		or string.find(LowerName, " lod", 1, true)
+	if AssetSuffix then
+		Name = string.sub(Name, 1, AssetSuffix - 1)
+	end
+	Name = Name:gsub("%.0%d+$", "")
+	Name = Name:gsub("(%l)(%u)", "%1 %2")
+	Name = Name:gsub("(%d)(%u)", "%1 %2")
+	Name = Name:gsub("(%a)(%d)", "%1 %2")
+	Name = Name:gsub("%s+", " "):gsub("%s+$", "")
 	if string.lower(Name) == "crates" then
 		return "Crate"
 	end
@@ -1922,6 +1933,19 @@ local function ResolveCrateCandidate(Instance)
 	if IsInstanceA(Candidate, "BasePart") then
 		local Parent = GetInstanceParent(Candidate)
 		if Parent and IsInstanceA(Parent, "Model") then
+			Candidate = Parent
+		end
+	end
+
+	local CandidateName = GetInstanceName(Candidate)
+	local LowerCandidateName = string.lower(CandidateName or "")
+	if
+		string.find(LowerCandidateName, "lod", 1, true)
+		or string.find(LowerCandidateName, "palette", 1, true)
+		or string.find(LowerCandidateName, ".00", 1, true)
+	then
+		local Parent = GetInstanceParent(Candidate)
+		if Parent and IsInstanceA(Parent, "Model") and IsCrateName(GetInstanceName(Parent)) then
 			Candidate = Parent
 		end
 	end
@@ -1978,6 +2002,7 @@ local function RefreshCrateTargets()
 	local FoundTargets = {}
 	local FoundCount = 0
 	local DiscoveredNames = {}
+	local SeenCandidateIdentities = {}
 
 	local function AddCandidate(Instance, LabelHint)
 		if FoundCount >= CRATE_TARGET_LIMIT then
@@ -1991,16 +2016,38 @@ local function RefreshCrateTargets()
 		end
 
 		local Identity = GetInstanceIdentity(Candidate)
-		if FoundTargets[Identity] then
+		if SeenCandidateIdentities[Identity] then
 			return
 		end
+		SeenCandidateIdentities[Identity] = true
 
 		local CandidateName = GetInstanceName(Candidate)
 		local DisplayName = CleanCrateName(IsCrateName(CandidateName) and CandidateName or LabelHint)
+		local CandidatePosition = GetPartPosition(Part)
+		if CandidatePosition then
+			for _, ExistingTarget in FoundTargets do
+				local ExistingPosition = ExistingTarget.AnchorPosition
+				if
+					ExistingTarget.DisplayName == DisplayName
+					and ExistingPosition
+					and (ExistingPosition - CandidatePosition).Magnitude <= 6
+				then
+					local MemberCount = ExistingTarget.MemberCount or 1
+					ExistingTarget.AnchorPosition = (
+						ExistingPosition * MemberCount + CandidatePosition
+					) / (MemberCount + 1)
+					ExistingTarget.MemberCount = MemberCount + 1
+					return
+				end
+			end
+		end
+
 		FoundTargets[Identity] = {
 			Instance = Candidate,
 			Part = Part,
 			DisplayName = DisplayName,
+			AnchorPosition = CandidatePosition,
+			MemberCount = 1,
 		}
 		DiscoveredNames[DisplayName] = true
 		FoundCount = FoundCount + 1
@@ -2169,22 +2216,42 @@ end
 
 local function GetCrateScreenBox(Target, Distance)
 	local Part = Target.Part or FindCratePart(Target.Instance)
-	if not Part then
+	local AnchorPosition = Target.AnchorPosition or GetPartPosition(Part)
+	if not Part or not AnchorPosition then
 		return nil
+	end
+
+	local AnchorScreen, AnchorOnScreen = ProjectToScreen(AnchorPosition)
+	if not AnchorScreen or not AnchorOnScreen then
+		return nil
+	end
+
+	local FallbackHeight = Clamp(1100 / math.max(Distance, 1), 12, 70)
+	local FallbackWidth = FallbackHeight * 1.25
+	local function GetFallbackBox()
+		return AnchorScreen.X - FallbackWidth * 0.5,
+			AnchorScreen.Y - FallbackHeight * 0.5,
+			FallbackWidth,
+			FallbackHeight
 	end
 
 	local BoundsCFrame
 	local BoundsSize
-	pcall(function()
-		if IsInstanceA(Target.Instance, "Model") then
-			BoundsCFrame, BoundsSize = Target.Instance:GetBoundingBox()
-		end
-	end)
-	if not BoundsCFrame or not BoundsSize then
+	if (Target.MemberCount or 1) <= 1 then
 		pcall(function()
 			BoundsCFrame = Part.CFrame
 			BoundsSize = Part.Size
 		end)
+	end
+
+	local BoundsAreSane = false
+	if BoundsCFrame and BoundsSize then
+		BoundsAreSane = BoundsSize.X >= 0.05
+			and BoundsSize.Y >= 0.05
+			and BoundsSize.Z >= 0.05
+			and BoundsSize.X <= 30
+			and BoundsSize.Y <= 30
+			and BoundsSize.Z <= 30
 	end
 
 	local MinimumX = math.huge
@@ -2194,7 +2261,7 @@ local function GetCrateScreenBox(Target, Distance)
 	local ProjectedCount = 0
 	local AnyOnScreen = false
 
-	if BoundsCFrame and BoundsSize then
+	if BoundsAreSane then
 		for XSign = -1, 1, 2 do
 			for YSign = -1, 1, 2 do
 				for ZSign = -1, 1, 2 do
@@ -2226,19 +2293,24 @@ local function GetCrateScreenBox(Target, Distance)
 	if ProjectedCount >= 2 and AnyOnScreen then
 		local Width = MaximumX - MinimumX
 		local Height = MaximumY - MinimumY
-		if Width >= 3 and Height >= 3 and Width < 2000 and Height < 2000 then
+		local CenterX = MinimumX + Width * 0.5
+		local CenterY = MinimumY + Height * 0.5
+		local CenterOffset = Vector2.new(CenterX - AnchorScreen.X, CenterY - AnchorScreen.Y).Magnitude
+		local MaximumWidth = math.max(FallbackWidth * 3.5, 80)
+		local MaximumHeight = math.max(FallbackHeight * 3.5, 80)
+		local MaximumOffset = math.max(FallbackWidth, FallbackHeight) * 1.75 + 16
+		if
+			Width >= 3
+			and Height >= 3
+			and Width <= MaximumWidth
+			and Height <= MaximumHeight
+			and CenterOffset <= MaximumOffset
+		then
 			return MinimumX, MinimumY, Width, Height
 		end
 	end
 
-	local Position = GetPartPosition(Part)
-	local ScreenPosition, OnScreen = ProjectToScreen(Position)
-	if not ScreenPosition or not OnScreen then
-		return nil
-	end
-	local Height = Clamp(1100 / math.max(Distance, 1), 12, 70)
-	local Width = Height * 1.25
-	return ScreenPosition.X - Width * 0.5, ScreenPosition.Y - Height * 0.5, Width, Height
+	return GetFallbackBox()
 end
 
 local function BuildFullBoxSegments(X, Y, Width, Height)
@@ -2331,11 +2403,19 @@ local function UpdateCrateEspFrame()
 		FoundCount = FoundCount + 1
 		if ShouldTrackCrate(Target.DisplayName) then
 			local Part = Target.Part
-			local Position = GetPartPosition(Part)
+			local Position = Target.AnchorPosition
+			if (Target.MemberCount or 1) <= 1 then
+				local CurrentPosition = GetPartPosition(Part)
+				if CurrentPosition then
+					Position = CurrentPosition
+					Target.AnchorPosition = CurrentPosition
+				end
+			end
 			if not Position then
 				Part = FindCratePart(Target.Instance)
 				Target.Part = Part
 				Position = GetPartPosition(Part)
+				Target.AnchorPosition = Position
 			end
 			if Position then
 				local Distance = (Origin - Position).Magnitude
