@@ -41,8 +41,11 @@ local Flags = {
 	SilentFovRadius = 80,
 	SilentMaxDistance = 1800,
 	TeamCheck = false,
+	StickyAim = true,
 	FovCheck = true,
 	TargetParts = { "Head" },
+	AimProfile = "Rifles",
+	AimSmoothness = 20,
 	FovRadius = 120,
 	MaxAcquireDistance = 1800,
 	ProjectileSpeed = 2500,
@@ -78,6 +81,8 @@ local Connections = {}
 local Drawings = {}
 local Win
 local SilentAim
+local SmoothedAimPosition
+local SmoothedAimTargetName
 local EspStatus = {
 	Text = "off",
 	LastError = nil,
@@ -100,6 +105,8 @@ end
 
 local function ClearLock()
 	Flags.LockedPlayerName = nil
+	SmoothedAimPosition = nil
+	SmoothedAimTargetName = nil
 end
 
 function Runtime.Unload()
@@ -578,6 +585,11 @@ AimbotSection:Toggle("Roblox team check", false, function(Value)
 	end
 end):Tooltip("Roblox teams only; DesertStorm squad membership may use separate game data.")
 
+AimbotSection:Toggle("sticky aim", true, function(Value)
+	Flags.StickyAim = Value
+	ClearLock()
+end):Tooltip("Keeps the current target after it leaves the FOV. Releasing the aim key still clears it.")
+
 local FovToggle = TargetSection:Toggle("field of view", true, function(Value)
 	Flags.FovCheck = Value
 end)
@@ -587,11 +599,11 @@ FovToggle:AddColorpicker("fov color", Flags.FovColor, function(Color, Alpha)
 	Flags.FovAlpha = Alpha
 end)
 
-TargetSection:Slider("fov radius", Flags.FovRadius, 1, 10, 400, "px", function(Value)
+local FovRadiusSlider = TargetSection:Slider("fov radius", Flags.FovRadius, 1, 10, 400, "px", function(Value)
 	Flags.FovRadius = Value
 end)
 
-TargetSection:Slider(
+local AcquireRangeSlider = TargetSection:Slider(
 	"acquire range",
 	Flags.MaxAcquireDistance,
 	25,
@@ -603,7 +615,7 @@ TargetSection:Slider(
 	end
 ):Tooltip("Maximum target acquisition distance in Roblox studs.")
 
-TargetSection:Dropdown(
+local TargetHitboxDropdown = TargetSection:Dropdown(
 	"target hitboxes",
 	Flags.TargetParts,
 	{ "Head", "Upper Torso", "Humanoid Root Part", "Closest" },
@@ -619,6 +631,65 @@ TargetSection:Dropdown(
 		Flags.TargetParts = SelectedParts
 	end
 ):Tooltip("Enable several hitboxes; the closest enabled point is selected each frame.")
+
+local AimProfiles = {
+	Rifles = {
+		FovRadius = 120,
+		MaxDistance = 1800,
+		Hitboxes = { "Head", "Upper Torso" },
+		Smoothness = 20,
+	},
+	Sniper = {
+		FovRadius = 70,
+		MaxDistance = 3500,
+		Hitboxes = { "Head" },
+		Smoothness = 35,
+	},
+	Hybrid = {
+		FovRadius = 100,
+		MaxDistance = 2500,
+		Hitboxes = { "Head", "Upper Torso", "Humanoid Root Part" },
+		Smoothness = 25,
+	},
+}
+
+local SmoothnessSlider
+TargetSection:Dropdown(
+	"profiles",
+	{ Flags.AimProfile },
+	{ "Rifles", "Sniper", "Hybrid" },
+	false,
+	function(Value)
+		local ProfileName = Value[1]
+		local Profile = AimProfiles[ProfileName]
+		if not Profile then
+			return
+		end
+
+		Flags.AimProfile = ProfileName
+		FovRadiusSlider:Set(Profile.FovRadius)
+		AcquireRangeSlider:Set(Profile.MaxDistance)
+		TargetHitboxDropdown:Set(Profile.Hitboxes)
+		if SmoothnessSlider then
+			SmoothnessSlider:Set(Profile.Smoothness)
+		else
+			Flags.AimSmoothness = Profile.Smoothness
+		end
+		ClearLock()
+	end
+):Tooltip("DesertStorm-oriented target presets. You can still adjust every value afterward.")
+
+SmoothnessSlider = TargetSection:Slider(
+	"smoothness",
+	Flags.AimSmoothness,
+	1,
+	0,
+	100,
+	"%",
+	function(Value)
+		Flags.AimSmoothness = Value
+	end
+):Tooltip("0% snaps instantly; higher values follow the target more gradually.")
 
 local AutoPredictionToggle = PredictionSection:Toggle("auto prediction", true, function(Value)
 	Flags.AutoPrediction = Value
@@ -1598,4 +1669,140 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 
 	local Success, ErrorMessage = pcall(UpdateEspFrame)
 	if not Success then
-		ReportEspError("ESP frame failed", Er
+		ReportEspError("ESP frame failed", ErrorMessage)
+	end
+end))
+
+local FovCircleOutline = TrackDrawing(Drawing.new("Circle"))
+FovCircleOutline.Thickness = 3
+FovCircleOutline.NumSides = 96
+FovCircleOutline.Color = Color3.fromRGB(0, 0, 0)
+FovCircleOutline.Visible = false
+
+local FovCircle = TrackDrawing(Drawing.new("Circle"))
+FovCircle.Thickness = 1
+FovCircle.NumSides = 96
+FovCircle.Visible = false
+FovCircle.ZIndex = 5
+
+local SilentStatusUpdatedAt = -math.huge
+
+TrackConnection(RunService.RenderStepped:Connect(function()
+	if not Flags.Running then
+		return
+	end
+
+	local Mouse = LocalPlayer:GetMouse()
+	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
+	local ShowAimFov = Flags.Aimbot and Flags.FovCheck
+	local ShowSilentFov = Flags.SilentAim and Flags.SilentFovCheck
+	local ShowFov = ShowAimFov or ShowSilentFov
+	local DisplayFovRadius = 0
+	if ShowAimFov then
+		DisplayFovRadius = math.max(DisplayFovRadius, Flags.FovRadius)
+	end
+	if ShowSilentFov then
+		DisplayFovRadius = math.max(DisplayFovRadius, Flags.SilentFovRadius)
+	end
+
+	FovCircleOutline.Position = MousePosition
+	FovCircleOutline.Radius = DisplayFovRadius + 1
+	FovCircleOutline.Transparency = Flags.FovAlpha
+	FovCircleOutline.Visible = ShowFov
+
+	FovCircle.Position = MousePosition
+	FovCircle.Radius = DisplayFovRadius
+	FovCircle.Color = Flags.FovColor
+	FovCircle.Transparency = Flags.FovAlpha
+	FovCircle.Visible = ShowFov
+
+	local Now = tick()
+	if Flags.SilentAim and Now - SilentStatusUpdatedAt >= 0.1 then
+		SilentStatusUpdatedAt = Now
+		local Target, ScreenDistance, WorldDistance = FindClosestTarget({
+			FovCheck = Flags.SilentFovCheck,
+			FovRadius = Flags.SilentFovRadius,
+			MaxDistance = Flags.SilentMaxDistance,
+		})
+		UpdateSilentTargetStatus(Target, ScreenDistance, WorldDistance)
+	elseif not Flags.SilentAim then
+		SilentAimStatus.Text = "inactive"
+	end
+end))
+
+TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
+	if not Flags.Running then
+		return
+	end
+
+	if not Flags.Aimbot or not Flags.AimbotActive then
+		ClearLock()
+		return
+	end
+
+	local Camera = Workspace.CurrentCamera
+	if not Camera then
+		return
+	end
+
+	local Target
+	if Flags.StickyAim then
+		Target = GetLockedTarget()
+	end
+
+	if not Target then
+		Flags.LockedPlayerName = nil
+		Target = FindClosestTarget()
+		if Target and Flags.StickyAim then
+			Flags.LockedPlayerName = Target.Player.Name
+		end
+	end
+
+	if not Target then
+		SmoothedAimPosition = nil
+		SmoothedAimTargetName = nil
+		return
+	end
+
+	local CameraPosition = Camera.Position
+	local AimPosition = PredictTargetPosition(Target, CameraPosition)
+	if not AimPosition then
+		ClearLock()
+		return
+	end
+
+	local TargetName = Target.Player.Name
+	local Smoothness = math.clamp(Flags.AimSmoothness or 0, 0, 100)
+	local LookPosition = AimPosition
+	if Smoothness > 0 then
+		if SmoothedAimPosition and SmoothedAimTargetName == TargetName then
+			local ResponseSpeed = 28 - ((Smoothness / 100) * 26)
+			local FrameTime = math.max(DeltaTime or (1 / 60), 0)
+			local Alpha = math.clamp(1 - math.exp(-ResponseSpeed * FrameTime), 0.01, 1)
+			SmoothedAimPosition = SmoothedAimPosition:Lerp(AimPosition, Alpha)
+		else
+			local CurrentLookPosition
+			pcall(function()
+				local AimDistance = math.max((AimPosition - CameraPosition).Magnitude, 1)
+				CurrentLookPosition = CameraPosition + (Camera.CFrame.LookVector * AimDistance)
+			end)
+			SmoothedAimPosition = CurrentLookPosition or AimPosition
+		end
+		SmoothedAimTargetName = TargetName
+		LookPosition = SmoothedAimPosition
+	else
+		SmoothedAimPosition = AimPosition
+		SmoothedAimTargetName = TargetName
+	end
+
+	local AimSuccess = pcall(function()
+		Camera.lookAt(CameraPosition, LookPosition)
+	end)
+	if not AimSuccess then
+		ClearLock()
+	end
+end))
+
+Environment.SilentAim = SilentAim
+Environment.UnloadDesertStormAim = Runtime.Unload
+Environment.__MatchaAimRuntime = Runtime
