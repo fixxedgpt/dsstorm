@@ -69,6 +69,7 @@ local Flags = {
 	EspTextColor = Color3.fromRGB(235, 235, 235),
 	EspTextAlpha = 1,
 	EspMaxDistance = 2500,
+	EspRefreshRate = 90,
 	LockedPlayerName = nil,
 }
 
@@ -452,7 +453,7 @@ local WindowSuccess, WindowResult = pcall(function()
 		title = "gamesense",
 		subtitle = "DesertStorm extraction",
 		size = Vector2.new(610, 450),
-		menuKey = "insert",
+		menuKey = "lbracket",
 		configFolder = "gamesense-desertstorm",
 		configName = "default",
 		opacity = 1,
@@ -752,6 +753,10 @@ EspRangeSection:Slider("max distance", Flags.EspMaxDistance, 25, 100, 5000, "u",
 	Flags.EspMaxDistance = Value
 end):Tooltip("Player ESP range in Roblox studs.")
 
+EspRangeSection:Slider("refresh rate", Flags.EspRefreshRate, 5, 30, 144, "hz", function(Value)
+	Flags.EspRefreshRate = Value
+end):Tooltip("Lower this if the menu or game becomes slow while ESP is enabled.")
+
 EspRangeSection:Label(function()
 	return "status: " .. EspStatus.Text
 end)
@@ -950,6 +955,12 @@ local function HideEspBundle(Bundle)
 	end
 	if Bundle.Snapline then
 		Bundle.Snapline.Visible = false
+	end
+end
+
+local function HideAllEspBundles()
+	for _, Bundle in EspBundles do
+		HideEspBundle(Bundle)
 	end
 end
 
@@ -1246,32 +1257,24 @@ local function GetEspBox(Target)
 	return CenterX - Width * 0.5, TopY, Width, Height
 end
 
-local function UpdateEspBundle(Bundle, Target, Camera)
-	HideEspBundle(Bundle)
-
-	local LocalPosition = GetPartPosition(GetLocalRoot())
+local function UpdateEspBundle(Bundle, Target, Camera, Origin)
 	local TargetPosition = GetPartPosition(Target.RootPart)
 	if not TargetPosition then
-		return
+		return false
 	end
 
-	local CameraPosition
-	pcall(function()
-		CameraPosition = Camera.Position
-	end)
-	local Origin = LocalPosition or CameraPosition
 	if not Origin then
-		return
+		return false
 	end
 
 	local Distance = (Origin - TargetPosition).Magnitude
 	if Distance > Flags.EspMaxDistance then
-		return
+		return false
 	end
 
 	local X, Y, Width, Height = GetEspBox(Target)
 	if not X then
-		return
+		return false
 	end
 
 	if Flags.EspChams and Bundle.Chams then
@@ -1280,6 +1283,8 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		Bundle.Chams.Color = Flags.EspChamsColor
 		Bundle.Chams.Transparency = Flags.EspChamsAlpha
 		Bundle.Chams.Visible = true
+	elseif Bundle.Chams then
+		Bundle.Chams.Visible = false
 	end
 
 	if Flags.EspBox then
@@ -1293,6 +1298,13 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 			Flags.EspBoxAlpha
 		)
 		SetEspBoxLines(Bundle.Box, X, Y, Width, Height, Flags.EspBoxColor, Flags.EspBoxAlpha)
+	else
+		for _, Line in Bundle.BoxOutline do
+			Line.Visible = false
+		end
+		for _, Line in Bundle.Box do
+			Line.Visible = false
+		end
 	end
 
 	if Flags.EspHealth and Bundle.HealthBackground and Bundle.HealthBar then
@@ -1308,6 +1320,13 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		Bundle.HealthBar.Color = Color3.new(1 - HealthRatio, HealthRatio, 0)
 		Bundle.HealthBar.Transparency = 1
 		Bundle.HealthBar.Visible = true
+	else
+		if Bundle.HealthBackground then
+			Bundle.HealthBackground.Visible = false
+		end
+		if Bundle.HealthBar then
+			Bundle.HealthBar.Visible = false
+		end
 	end
 
 	if Flags.EspName and Bundle.Name then
@@ -1316,6 +1335,8 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		Bundle.Name.Color = Flags.EspTextColor
 		Bundle.Name.Transparency = Flags.EspTextAlpha
 		Bundle.Name.Visible = true
+	elseif Bundle.Name then
+		Bundle.Name.Visible = false
 	end
 
 	local InfoParts = {}
@@ -1334,6 +1355,8 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		Bundle.Info.Color = Flags.EspTextColor
 		Bundle.Info.Transparency = Flags.EspTextAlpha
 		Bundle.Info.Visible = true
+	elseif Bundle.Info then
+		Bundle.Info.Visible = false
 	end
 
 	if Bundle.Flag and Flags.LockedPlayerName == Target.Player.Name then
@@ -1342,6 +1365,8 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 		Bundle.Flag.Color = Color3.fromRGB(149, 192, 33)
 		Bundle.Flag.Transparency = 1
 		Bundle.Flag.Visible = true
+	elseif Bundle.Flag then
+		Bundle.Flag.Visible = false
 	end
 
 	if Flags.EspSnapline and Bundle.SnaplineOutline and Bundle.Snapline then
@@ -1362,22 +1387,31 @@ local function UpdateEspBundle(Bundle, Target, Camera)
 			Bundle.Snapline.Color = Flags.EspSnaplineColor
 			Bundle.Snapline.Transparency = Flags.EspSnaplineAlpha
 			Bundle.Snapline.Visible = true
+		else
+			Bundle.SnaplineOutline.Visible = false
+			Bundle.Snapline.Visible = false
+		end
+	else
+		if Bundle.SnaplineOutline then
+			Bundle.SnaplineOutline.Visible = false
+		end
+		if Bundle.Snapline then
+			Bundle.Snapline.Visible = false
 		end
 	end
 
+	Bundle.LastDrawnAt = tick()
 	return true
 end
 
 local function UpdateEspFrame()
-	for _, Bundle in EspBundles do
-		HideEspBundle(Bundle)
-	end
-
 	if not Flags.Running or not Flags.EspEnabled then
+		HideAllEspBundles()
 		EspStatus.Text = "off"
 		return
 	end
 	if EspRendererFailed then
+		HideAllEspBundles()
 		if not EspStatus.LastError then
 			EspStatus.Text = "renderer unavailable"
 		end
@@ -1386,25 +1420,40 @@ local function UpdateEspFrame()
 
 	local Camera = Workspace.CurrentCamera
 	if not Camera then
+		HideAllEspBundles()
 		EspStatus.Text = "waiting for camera"
+		return
+	end
+
+	local Origin = GetPartPosition(GetLocalRoot())
+	if not Origin then
+		pcall(function()
+			Origin = Camera.Position
+		end)
+	end
+	if not Origin then
+		HideAllEspBundles()
+		EspStatus.Text = "waiting for position"
 		return
 	end
 
 	local PlayerCount = 0
 	local ValidCount = 0
 	local DrawnCount = 0
+	local ActiveBundles = {}
 	for _, Player in Players:GetPlayers() do
 		if Player ~= LocalPlayer then
 			PlayerCount = PlayerCount + 1
 		end
 
+		local Bundle
 		local Success, WasDrawn = pcall(function()
 			local Target = GetEspTarget(Player)
 			if Target then
 				ValidCount = ValidCount + 1
-				local Bundle = GetEspBundle(Player)
+				Bundle = GetEspBundle(Player)
 				if Bundle then
-					return UpdateEspBundle(Bundle, Target, Camera)
+					return UpdateEspBundle(Bundle, Target, Camera, Origin)
 				end
 			end
 			return false
@@ -1413,6 +1462,17 @@ local function UpdateEspFrame()
 			ReportEspError("player update failed", WasDrawn)
 		elseif Success and WasDrawn then
 			DrawnCount = DrawnCount + 1
+			ActiveBundles[Bundle] = true
+		end
+	end
+
+	local Now = tick()
+	for _, Bundle in EspBundles do
+		if
+			not ActiveBundles[Bundle]
+			and (not Bundle.LastDrawnAt or Now - Bundle.LastDrawnAt > 0.08)
+		then
+			HideEspBundle(Bundle)
 		end
 	end
 
@@ -1429,15 +1489,25 @@ local function UpdateEspFrame()
 	end
 end
 
-task.spawn(function()
-	while Flags.Running do
-		local Success, ErrorMessage = pcall(UpdateEspFrame)
-		if not Success then
-			ReportEspError("ESP frame failed", ErrorMessage)
-		end
-		task.wait(1 / 144)
+local EspLastUpdateAt = -math.huge
+
+TrackConnection(RunService.RenderStepped:Connect(function()
+	if not Flags.Running then
+		return
 	end
-end)
+
+	local Now = tick()
+	local RefreshInterval = 1 / math.max(Flags.EspRefreshRate, 30)
+	if Now - EspLastUpdateAt < RefreshInterval then
+		return
+	end
+	EspLastUpdateAt = Now
+
+	local Success, ErrorMessage = pcall(UpdateEspFrame)
+	if not Success then
+		ReportEspError("ESP frame failed", ErrorMessage)
+	end
+end))
 
 local FovCircleOutline = TrackDrawing(Drawing.new("Circle"))
 FovCircleOutline.Thickness = 3
