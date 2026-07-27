@@ -563,6 +563,9 @@ end)
 
 AimbotToggle:AddKeybind("MouseButton2", "Hold", function(Value)
 	Flags.AimbotActive = Value
+	if AimbotToggle:Get() ~= Value then
+		AimbotToggle:Set(Value)
+	end
 	if not Value then
 		ClearLock()
 	end
@@ -617,8 +620,14 @@ TargetSection:Dropdown(
 	end
 ):Tooltip("Enable several hitboxes; the closest enabled point is selected each frame.")
 
-PredictionSection:Toggle("auto prediction", true, function(Value)
+local AutoPredictionToggle = PredictionSection:Toggle("auto prediction", true, function(Value)
 	Flags.AutoPrediction = Value
+end)
+
+AutoPredictionToggle:AddKeybind("P", "Always", function(Value)
+	if AutoPredictionToggle:Get() ~= Value then
+		AutoPredictionToggle:Set(Value)
+	end
 end)
 
 local ProjectileSpeedSlider = PredictionSection:Slider(
@@ -1589,14 +1598,4 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 
 	local Success, ErrorMessage = pcall(UpdateEspFrame)
 	if not Success then
-		ReportEspError("ESP frame failed", ErrorMessage)
-	end
-end))
-
-local FovCircleOutline = TrackDrawing(Drawing.new("Circle"))
-FovCircleOutline.Thickness = 3
-FovCircleOutline.NumSides = 96
-FovCircleOutline.Color = Color3.fromRGB(0, 0, 0)
-FovCircleOutline.Visible = false
-
-local FovCircle = Tr
+		ReportEspError("ESP frame failed", Er
