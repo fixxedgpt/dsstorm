@@ -47,7 +47,6 @@ local Flags = {
 	SilentMaxDistance = 1800,
 	TeamCheck = false,
 	StickyAim = true,
-	TargetSelectionEnabled = true,
 	FovCheck = true,
 	DrawFov = true,
 	TargetParts = { "Head", "Upper Torso" },
@@ -687,13 +686,6 @@ AimbotSection:Toggle("sticky aim", true, function(Value)
 	Flags.StickyAim = Value
 	ClearLock()
 end):Tooltip("Keeps the current target after it leaves the FOV. Releasing the aim key still clears it.")
-
-TargetSection:Toggle("enabled", Flags.TargetSelectionEnabled, function(Value)
-	Flags.TargetSelectionEnabled = Value
-	if not Value then
-		ClearLock()
-	end
-end):Tooltip("Master switch for FOV, range, smoothness, hitboxes, and target profiles.")
 
 local DrawFovToggle = TargetSection:Toggle("draw fov", Flags.DrawFov, function(Value)
 	Flags.DrawFov = Value
@@ -1858,11 +1850,6 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 	end
 
 	if not Flags.Aimbot or not Flags.AimbotActive then
-		ClearLock()
-		return
-	end
-
-	if not Flags.TargetSelectionEnabled then
 		ClearLock()
 		return
 	end
