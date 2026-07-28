@@ -532,7 +532,7 @@ local function AddUiStatusEntrySupport(Source)
 		},
 		{
 			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)if ld then]=],
-			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)cb(bh+2,bi+2,(bj-4)/3,1,y(72,149,184),y(151,95,172),13,g)cb(bh+2+(bj-4)/3,bi+2,(bj-4)/3,1,y(151,95,172),y(202,86,94),13,g)cb(bh+2+2*(bj-4)/3,bi+2,(bj-4)/3,1,y(202,86,94),y(156,192,73),13,g)if ld then]=],
+			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)bg(bh+1,bi+1,bj-2,3,y(0,0,0),89,0,g)cb(bh+1,bi+1,(bj-2)/3,2,y(72,149,184),y(151,95,172),90,g)cb(bh+1+(bj-2)/3,bi+1,(bj-2)/3,2,y(151,95,172),y(202,86,94),90,g)cb(bh+1+2*(bj-2)/3,bi+1,(bj-2)/3,2,y(202,86,94),y(156,192,73),90,g)if ld then]=],
 		},
 	}
 
