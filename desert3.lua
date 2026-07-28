@@ -578,7 +578,7 @@ end
 
 local WindowSuccess, WindowResult = pcall(function()
 	return Lib:CreateWindow({
-		title = "gamesense",
+		title = "virtuosity",
 		subtitle = "DesertStorm extraction",
 		size = Vector2.new(610, 450),
 		menuKey = "lbracket",
