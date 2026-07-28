@@ -2,10 +2,20 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
+local DESERT_STORM_GAME_ID = 9161571268
 
 if not LocalPlayer then
 	warn("LocalPlayer is unavailable; aborting cleanly.")
 	return
+end
+
+local ActiveGameId
+pcall(function()
+	ActiveGameId = game.GameId
+end)
+
+if ActiveGameId and ActiveGameId ~= DESERT_STORM_GAME_ID then
+	warn("DesertStorm aim profile loaded outside its intended universe; settings may need adjustment.")
 end
 
 local Environment = _G
@@ -524,16 +534,13 @@ local function AddUiStatusEntrySupport(Source)
 			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)if ld then]=],
 			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)bg(bh+1,bi+1,bj-2,3,y(0,0,0),89,0,g)cb(bh+1,bi+1,(bj-2)/3,2,y(72,149,184),y(151,95,172),90,g)cb(bh+1+(bj-2)/3,bi+1,(bj-2)/3,2,y(151,95,172),y(202,86,94),90,g)cb(bh+1+2*(bj-2)/3,bi+1,(bj-2)/3,2,y(202,86,94),y(156,192,73),90,g)if ld then]=],
 		},
-		{
-			[=[bs(bh,bi,bj,bk,as,151,8,av.cardStrk*ag)bX("keybinds"]=],
-			[=[bs(bh,bi,bj,bk,as,151,8,av.cardStrk*ag)bg(bh+1,bi+1,bj-2,3,y(0,0,0),154,0,ag)cb(bh+1,bi+1,(bj-2)/3,2,y(72,149,184),y(151,95,172),155,ag)cb(bh+1+(bj-2)/3,bi+1,(bj-2)/3,2,y(151,95,172),y(202,86,94),155,ag)cb(bh+1+2*(bj-2)/3,bi+1,(bj-2)/3,2,y(202,86,94),y(156,192,73),155,ag)bX("keybinds"]=],
-		},
 	}
 
 	for PatchIndex, Patch in Patches do
 		local Applied
 		Source, Applied = ReplacePlainOnce(Source, Patch[1], Patch[2])
 		if not Applied then
+			warn("UI status-entry patch " .. tostring(PatchIndex) .. " is unavailable; using the stock UI.")
 			return OriginalSource, false
 		end
 	end
@@ -595,6 +602,9 @@ if not WindowSuccess or not WindowResult then
 end
 
 Win = WindowResult
+pcall(function()
+	Win:SetTitle("virtuosity")
+end)
 
 local VirtuosityGreen = Color3.fromRGB(149, 192, 33)
 local ThemeSuccess, ThemeError = pcall(function()
