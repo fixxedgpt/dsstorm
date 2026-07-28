@@ -1368,6 +1368,15 @@ local function IsMeaningfulBlocker(Instance, TargetCharacter)
 	return type(Transparency) ~= "number" or Transparency < 0.98
 end
 
+local function IsInsideIgnoreList(Instance, IgnoreList)
+	for _, Ignored in IgnoreList do
+		if IsInsideCharacter(Instance, Ignored) then
+			return true
+		end
+	end
+	return false
+end
+
 local function QueryCameraOcclusion(Camera, SamplePosition, IgnoreList, TargetCharacter)
 	local Success, Blockers = pcall(function()
 		return Camera:GetPartsObscuringTarget({ SamplePosition }, IgnoreList)
@@ -1393,10 +1402,12 @@ local function QueryLegacyRay(CameraPosition, Direction, IgnoreList, TargetChara
 		return nil
 	end
 
+	local UsedIgnoreList = true
 	local Success, Hit = pcall(function()
 		return Workspace:FindPartOnRayWithIgnoreList(LegacyRay, IgnoreList, false, true)
 	end)
 	if not Success then
+		UsedIgnoreList = false
 		local LocalCharacter
 		pcall(function()
 			LocalCharacter = LocalPlayer.Character
@@ -1408,7 +1419,62 @@ local function QueryLegacyRay(CameraPosition, Direction, IgnoreList, TargetChara
 			return nil
 		end
 	end
+	if not Hit then
+		return UsedIgnoreList and true or nil
+	end
+	if not UsedIgnoreList and IsInsideIgnoreList(Hit, IgnoreList) then
+		return nil
+	end
 	return not IsMeaningfulBlocker(Hit, TargetCharacter)
+end
+
+local function QueryUnfilteredRay(CameraPosition, Direction, IgnoreList, TargetCharacter)
+	local Distance = Direction.Magnitude
+	if Distance <= 0.05 then
+		return true
+	end
+
+	local UnitDirection = Direction / Distance
+	local CurrentOrigin = CameraPosition
+	local RemainingDistance = Distance
+	for _ = 1, 10 do
+		local Success, Result = pcall(function()
+			return Workspace:Raycast(CurrentOrigin, UnitDirection * RemainingDistance)
+		end)
+		if not Success then
+			return nil
+		end
+		if not Result then
+			return nil
+		end
+
+		local Hit
+		local HitPosition
+		pcall(function()
+			Hit = Result.Instance
+			HitPosition = Result.Position
+		end)
+		if not Hit then
+			return nil
+		end
+		if IsInsideCharacter(Hit, TargetCharacter) then
+			return true
+		end
+		if IsMeaningfulBlocker(Hit, TargetCharacter) and not IsInsideIgnoreList(Hit, IgnoreList) then
+			return false
+		end
+		if not HitPosition then
+			return nil
+		end
+
+		local Travelled = (HitPosition - CurrentOrigin).Magnitude + 0.05
+		RemainingDistance = RemainingDistance - Travelled
+		if RemainingDistance <= 0.05 then
+			return nil
+		end
+		CurrentOrigin = HitPosition + (UnitDirection * 0.05)
+	end
+	return nil
 end
 
 local function QueryModernRay(CameraPosition, Direction, IgnoreList, TargetCharacter)
@@ -1462,6 +1528,14 @@ local function QueryVisibilityPoint(Camera, CameraPosition, SamplePosition, Igno
 	local LegacyVisible = QueryLegacyRay(CameraPosition, Direction, IgnoreList, TargetCharacter)
 	if LegacyVisible ~= nil then
 		if not LegacyVisible then
+			return false, true
+		end
+		ReliableClearCheck = true
+	end
+
+	local DirectVisible = QueryUnfilteredRay(CameraPosition, Direction, IgnoreList, TargetCharacter)
+	if DirectVisible ~= nil then
+		if not DirectVisible then
 			return false, true
 		end
 		ReliableClearCheck = true
