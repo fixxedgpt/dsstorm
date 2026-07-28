@@ -582,7 +582,7 @@ local WindowSuccess, WindowResult = pcall(function()
 		subtitle = "DesertStorm extraction",
 		size = Vector2.new(610, 450),
 		menuKey = "lbracket",
-		configFolder = "gamesense-desertstorm",
+		configFolder = "virtuosity-desertstorm",
 		configName = "default",
 		opacity = 1,
 		gameInput = false,
@@ -606,7 +606,7 @@ pcall(function()
 	Win:SetTitle("virtuosity")
 end)
 
-local GamesenseGreen = Color3.fromRGB(149, 192, 33)
+local VirtuosityGreen = Color3.fromRGB(149, 192, 33)
 local ThemeSuccess, ThemeError = pcall(function()
 	Win:SetTheme({
 		bg = Color3.fromRGB(17, 17, 17),
@@ -614,18 +614,18 @@ local ThemeSuccess, ThemeError = pcall(function()
 		white = Color3.fromRGB(235, 235, 235),
 		text = Color3.fromRGB(235, 235, 235),
 		sub = Color3.fromRGB(145, 145, 145),
-		accent = GamesenseGreen,
-		accentA = GamesenseGreen,
-		accentB = GamesenseGreen,
+		accent = VirtuosityGreen,
+		accentA = VirtuosityGreen,
+		accentB = VirtuosityGreen,
 		surface = Color3.fromRGB(20, 20, 20),
 		surface2 = Color3.fromRGB(27, 27, 27),
 		surface3 = Color3.fromRGB(38, 38, 38),
 		border = Color3.fromRGB(61, 65, 76),
 		trackOff = Color3.fromRGB(71, 71, 71),
-		trackOn = GamesenseGreen,
+		trackOn = VirtuosityGreen,
 		knobOff = Color3.fromRGB(105, 105, 105),
 		sliderTrack = Color3.fromRGB(71, 71, 71),
-		good = GamesenseGreen,
+		good = VirtuosityGreen,
 		bad = Color3.fromRGB(214, 72, 72),
 		unsafe = Color3.fromRGB(214, 176, 72),
 	})
