@@ -82,7 +82,7 @@ local Flags = {
 	CrateEspShowDistance = true,
 	CrateEspColor = Color3.fromRGB(214, 176, 72),
 	CrateEspAlpha = 1,
-	CrateEspMaxDistance = 100,
+	CrateEspMaxDistance = 5000,
 	LockedPlayerName = nil,
 }
 
@@ -1001,7 +1001,7 @@ CrateEspSection:Dropdown(
 		end
 		Flags.CrateEspTrackedNames = SelectedNames
 	end
-):Tooltip("Confirmed crate types will be added here after their Workspace IDs are captured.")
+):Tooltip("Only the confirmed Desert Storm crate IDs are tracked.")
 
 CrateEspSection:Dropdown(
 	"others",
@@ -1819,6 +1819,7 @@ local ConfirmedCrateBundles = {}
 local ConfirmedCrateScanRunning = false
 local ConfirmedCrateScanComplete = false
 local ConfirmedCrateErrorReported = false
+local ConfirmedCrateStatusUpdatedAt = -math.huge
 
 local function CompactConfirmedCrateName(Value)
 	return string.lower(tostring(Value or "")):gsub("[^%w]", "")
@@ -1834,7 +1835,9 @@ end
 
 AddConfirmedCrateAlias("Wooden Crate", "Wooden Crate", "Crates")
 AddConfirmedCrateAlias("Millitary Container", "Millitary Container", "Crates")
+AddConfirmedCrateAlias("Military Container", "Millitary Container", "Crates")
 AddConfirmedCrateAlias("Aid Crates 56", "Aid Crates 56", "Crates")
+AddConfirmedCrateAlias("Aid Crate 56", "Aid Crates 56", "Crates")
 AddConfirmedCrateAlias(
 	"Meshes/bms metalcrate 48x48",
 	"Meshes/bms metalcrate 48x48",
@@ -1931,13 +1934,14 @@ local function GetConfirmedCrateAlias(Instance)
 end
 
 local function ResolveConfirmedCrate(Instance)
+	local FallbackPart
 	local Cursor = Instance
 	for _ = 1, 6 do
 		if not Cursor or Cursor == Workspace then
 			break
 		end
-		if ConfirmedCrateIsA(Cursor, "BasePart") then
-			return Cursor, Cursor
+		if not FallbackPart and ConfirmedCrateIsA(Cursor, "BasePart") then
+			FallbackPart = Cursor
 		end
 		if ConfirmedCrateIsA(Cursor, "Model") then
 			local PrimaryPart
@@ -1951,11 +1955,36 @@ local function ResolveConfirmedCrate(Instance)
 			pcall(function()
 				Part = Cursor:FindFirstChildWhichIsA("BasePart", true)
 			end)
+			Part = ConfirmedCrateIsA(PrimaryPart, "BasePart")
+					and PrimaryPart
+				or Part
 			if ConfirmedCrateIsA(Part, "BasePart") then
-				return Cursor, Part
+				local BoxSize
+				pcall(function()
+					local _, Size = Cursor:GetBoundingBox()
+					BoxSize = Size
+				end)
+				if
+					BoxSize
+					and BoxSize.X <= 80
+					and BoxSize.Y <= 80
+					and BoxSize.Z <= 80
+				then
+					return Cursor, Part
+				end
 			end
 		end
 		Cursor = GetConfirmedCrateParent(Cursor)
+	end
+
+	if not FallbackPart and ConfirmedCrateIsA(Instance, "SpecialMesh") then
+		local Parent = GetConfirmedCrateParent(Instance)
+		if ConfirmedCrateIsA(Parent, "BasePart") then
+			FallbackPart = Parent
+		end
+	end
+	if FallbackPart then
+		return FallbackPart, FallbackPart
 	end
 
 	local Part
@@ -1995,9 +2024,7 @@ local function CacheConfirmedCrate(Instance, TargetMap)
 		return false
 	end
 	local BoxCFrame, BoxSize = GetConfirmedCrateBounds(Owner, Part)
-	TargetMap[Part] = {
-		Instance = Instance,
-		Owner = Owner,
+	TargetMap[Owner] = {
 		Part = Part,
 		DisplayName = Alias.DisplayName,
 		Category = Alias.Category,
@@ -2058,7 +2085,9 @@ local function StartConfirmedCrateScan()
 		local Success, Result = pcall(ScanConfirmedCrates)
 		ConfirmedCrateScanRunning = false
 		if Success and Result then
-			ConfirmedCrateTargets = Result
+			for Owner, Target in pairs(Result) do
+				ConfirmedCrateTargets[Owner] = Target
+			end
 			ConfirmedCrateScanComplete = true
 			CrateEspStatus.Text = tostring(CountConfirmedCrates()) .. " confirmed"
 		elseif not Success then
@@ -2160,6 +2189,10 @@ local function ShouldDrawConfirmedCrate(Target)
 		)
 end
 
+local function ConfirmedCratePointIsInFront(ScreenPoint)
+	return typeof(ScreenPoint) ~= "Vector3" or ScreenPoint.Z > 0
+end
+
 local function GetProjectedConfirmedBounds(Target)
 	local BoxCFrame = Target.BoundsCFrame
 	local BoxSize = Target.BoundsSize
@@ -2179,7 +2212,10 @@ local function GetProjectedConfirmedBounds(Target)
 					Half.Z * Z
 				))
 				local ScreenPoint, OnScreen = ProjectToScreen(WorldPoint)
-				if ScreenPoint and ScreenPoint.Z > 0 then
+				if
+					ScreenPoint
+					and ConfirmedCratePointIsInFront(ScreenPoint)
+				then
 					MinX = math.min(MinX, ScreenPoint.X)
 					MinY = math.min(MinY, ScreenPoint.Y)
 					MaxX = math.max(MaxX, ScreenPoint.X)
@@ -2242,6 +2278,59 @@ local function DrawConfirmedCrateBox(Bundle, X, Y, Width, Height)
 	end
 end
 
+local function RenderConfirmedCrateTarget(Target, Origin, BundleSlot)
+	if not ShouldDrawConfirmedCrate(Target) then
+		return nil, false
+	end
+	local Position = GetPartPosition(Target.Part)
+	if not Position or not Origin then
+		return nil, true
+	end
+	local Distance = (Position - Origin).Magnitude
+	if Distance > Flags.CrateEspMaxDistance then
+		return nil, true
+	end
+	local Center, OnScreen = ProjectToScreen(Position)
+	if
+		not Center
+		or not OnScreen
+		or not ConfirmedCratePointIsInFront(Center)
+	then
+		return nil, true
+	end
+	local X, Y, Width, Height = GetProjectedConfirmedBounds(Target)
+	if not X then
+		return nil, true
+	end
+
+	local Bundle = ConfirmedCrateBundles[BundleSlot]
+		or CreateConfirmedCrateBundle()
+	if not Bundle then
+		return nil, true
+	end
+	if Flags.CrateEspBox then
+		DrawConfirmedCrateBox(Bundle, X, Y, Width, Height)
+	else
+		for Index = 1, 8 do
+			SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
+			SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
+		end
+	end
+	local Label = Target.DisplayName
+	if Flags.CrateEspShowDistance then
+		Label = Label
+			.. "  ["
+			.. tostring(math.floor(Distance + 0.5))
+			.. "u]"
+	end
+	SetDrawingProperty(Bundle.Label, "Text", Label)
+	SetDrawingProperty(Bundle.Label, "Position", Vector2.new(X + Width * 0.5, Y - 15))
+	SetDrawingProperty(Bundle.Label, "Color", Flags.CrateEspColor)
+	SetDrawingProperty(Bundle.Label, "Transparency", Flags.CrateEspAlpha)
+	SetDrawingProperty(Bundle.Label, "Visible", true)
+	return Bundle, true
+end
+
 local function UpdateConfirmedCrateEsp()
 	if not Flags.CrateEspEnabled then
 		HideAllConfirmedCrates()
@@ -2256,60 +2345,55 @@ local function UpdateConfirmedCrateEsp()
 	local BundleIndex = 0
 	local Found = 0
 	local Drawn = 0
-	for _, Target in pairs(ConfirmedCrateTargets) do
-		if ShouldDrawConfirmedCrate(Target) then
-			Found = Found + 1
-			local Position = GetPartPosition(Target.Part)
-			if Position and Origin then
-				local Distance = (Position - Origin).Magnitude
-				if Distance <= Flags.CrateEspMaxDistance then
-					local Center, OnScreen = ProjectToScreen(Position)
-					if Center and Center.Z > 0 and OnScreen then
-						local X, Y, Width, Height = GetProjectedConfirmedBounds(Target)
-						if X then
-							BundleIndex = BundleIndex + 1
-							local Bundle = ConfirmedCrateBundles[BundleIndex]
-								or CreateConfirmedCrateBundle()
-							if Bundle then
-								if Flags.CrateEspBox then
-									DrawConfirmedCrateBox(Bundle, X, Y, Width, Height)
-								else
-									for Index = 1, 8 do
-										SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
-										SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
-									end
-								end
-								local Label = Target.DisplayName
-								if Flags.CrateEspShowDistance then
-									Label = Label
-										.. "  ["
-										.. tostring(math.floor(Distance + 0.5))
-										.. "u]"
-								end
-								SetDrawingProperty(Bundle.Label, "Text", Label)
-								SetDrawingProperty(Bundle.Label, "Position", Vector2.new(X + Width * 0.5, Y - 15))
-								SetDrawingProperty(Bundle.Label, "Color", Flags.CrateEspColor)
-								SetDrawingProperty(Bundle.Label, "Transparency", Flags.CrateEspAlpha)
-								SetDrawingProperty(Bundle.Label, "Visible", true)
-								ActiveBundles[Bundle] = true
-								Drawn = Drawn + 1
-							end
-						end
-					end
+	local Skipped = 0
+	local RemovedOwners = {}
+	for Owner, Target in pairs(ConfirmedCrateTargets) do
+		if GetConfirmedCrateParent(Owner) then
+			local Success, Bundle, WasSelected = pcall(
+				RenderConfirmedCrateTarget,
+				Target,
+				Origin,
+				BundleIndex + 1
+			)
+			if Success then
+				if WasSelected then
+					Found = Found + 1
 				end
+				if Bundle then
+					BundleIndex = BundleIndex + 1
+					ActiveBundles[Bundle] = true
+					Drawn = Drawn + 1
+				end
+			else
+				Skipped = Skipped + 1
 			end
+		else
+			RemovedOwners[#RemovedOwners + 1] = Owner
 		end
+	end
+	for _, Owner in ipairs(RemovedOwners) do
+		ConfirmedCrateTargets[Owner] = nil
 	end
 	for _, Bundle in ipairs(ConfirmedCrateBundles) do
 		if not ActiveBundles[Bundle] then
 			HideConfirmedCrateBundle(Bundle)
 		end
 	end
-	if ConfirmedCrateScanComplete then
+	if
+		ConfirmedCrateScanComplete
+		and tick() - ConfirmedCrateStatusUpdatedAt >= 0.25
+	then
+		ConfirmedCrateStatusUpdatedAt = tick()
 		CrateEspStatus.Text = tostring(Drawn)
 			.. "/"
 			.. tostring(Found)
 			.. " confirmed"
+		if Skipped > 0 then
+			CrateEspStatus.Text = CrateEspStatus.Text
+				.. " | "
+				.. tostring(Skipped)
+				.. " skipped"
+		end
 	end
 end
 
@@ -2324,7 +2408,7 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 	local CrateSuccess, CrateError = pcall(UpdateConfirmedCrateEsp)
 	if not CrateSuccess then
 		HideAllConfirmedCrates()
-		CrateEspStatus.Text = "update unavailable"
+		CrateEspStatus.Text = "renderer error"
 		if not ConfirmedCrateErrorReported then
 			ConfirmedCrateErrorReported = true
 			warn("confirmed crate ESP failed: " .. tostring(CrateError))
