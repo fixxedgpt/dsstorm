@@ -83,6 +83,7 @@ local Flags = {
 	CrateEspColor = Color3.fromRGB(214, 176, 72),
 	CrateEspAlpha = 1,
 	CrateEspMaxDistance = 2000,
+	CrateScannerEnabled = false,
 	LockedPlayerName = nil,
 }
 
@@ -98,6 +99,10 @@ local EspStatus = {
 }
 local CrateEspStatus = {
 	Text = "off",
+}
+local CrateScannerStatus = {
+	Text = "off",
+	Report = "",
 }
 local CrateTrackChoices = {
 	"All crates",
@@ -123,6 +128,7 @@ for _, Name in CrateOtherChoices do
 	StaticCrateTypeSet[Name] = "Others"
 end
 local RequestCrateEspScan
+local CopyCrateScannerReport
 local SilentAimStatus = {
 	Text = "inactive",
 }
@@ -1074,6 +1080,21 @@ end)
 CrateEspSection:Label(function()
 	return "status [static loot]: " .. CrateEspStatus.Text
 end)
+
+CrateEspSection:Toggle("case scanner", false, function(Value)
+	Flags.CrateScannerEnabled = Value
+	CrateScannerStatus.Text = Value and "open a case manually" or "off"
+end):Tooltip("Records the raw Workspace model and path when you manually open a container.")
+
+CrateEspSection:Label(function()
+	return "scanner: " .. CrateScannerStatus.Text
+end)
+
+CrateEspSection:Button("copy workspace id", function()
+	if CopyCrateScannerReport then
+		CopyCrateScannerReport()
+	end
+end):Tooltip("Copies the last captured raw name, path, prompt text and mesh IDs.")
 
 local SettingsTab = Win:AddSettingsTab("cog")
 local ScriptSettingsSection = SettingsTab:Section("script", "Right")
@@ -2603,6 +2624,66 @@ local function RefreshCrateTargets()
 	CrateEspTargets = FoundTargets
 end
 
+local function RefreshCrateTargetsByName()
+	local FoundTargets = {}
+	local SeenIdentities = {}
+	local FoundCount = 0
+	local Queue = { Workspace }
+	local QueueIndex = 1
+	local ProcessedSinceYield = 0
+
+	while QueueIndex <= #Queue and FoundCount < CRATE_TARGET_LIMIT and Flags.Running do
+		local Parent = Queue[QueueIndex]
+		QueueIndex = QueueIndex + 1
+		local Children
+		pcall(function()
+			Children = Parent:GetChildren()
+		end)
+
+		for _, Child in Children or {} do
+			Queue[#Queue + 1] = Child
+			local DisplayName = GetStaticCrateLabelFromText(GetInstanceName(Child))
+			if DisplayName then
+				local Candidate = ResolveCrateCandidate(Child)
+				local Part = FindCratePart(Candidate)
+				local Position = GetPartPosition(Part)
+				if Candidate and Part and Position then
+					local Identity = GetInstanceIdentity(Candidate)
+					if not SeenIdentities[Identity] then
+						SeenIdentities[Identity] = true
+						FoundTargets[Identity] = {
+							Instance = Candidate,
+							SourceInstance = Child,
+							Part = Part,
+							DisplayName = DisplayName,
+							Category = StaticCrateTypeSet[DisplayName],
+							AnchorPosition = Position,
+							MemberCount = 1,
+						}
+						FoundCount = FoundCount + 1
+					end
+				end
+			end
+
+			ProcessedSinceYield = ProcessedSinceYield + 1
+			if ProcessedSinceYield >= 120 then
+				ProcessedSinceYield = 0
+				task.wait()
+				if not Flags.Running then
+					return
+				end
+			end
+		end
+	end
+
+	for Identity, Target in CrateEspTargets do
+		if not FoundTargets[Identity] then
+			FoundTargets[Identity] = Target
+		end
+	end
+	CrateEspTargets = FoundTargets
+end
+
 RequestCrateEspScan = function(Force)
 	if not Flags.Running then
 		return
@@ -2622,7 +2703,7 @@ local function StartCrateEspScan()
 	CrateEspScanRequested = false
 	CrateEspStatus.Text = "scanning loot..."
 	task.spawn(function()
-		local ScanSuccess, ScanError = pcall(RefreshCrateTargets)
+		local ScanSuccess, ScanError = pcall(RefreshCrateTargetsByName)
 		CrateEspScanRunning = false
 		if not Flags.Running then
 			return
@@ -2642,7 +2723,7 @@ end
 
 local function CacheStaticCrateInstance(Instance, LabelHint, Trusted, PreferLabelHint, AnchorPart)
 	local Candidate = ResolveCrateCandidate(Instance)
-	local LootableRoot = FindLootableCrateRoot(Candidate, Trusted)
+	local LootableRoot = Candidate
 	if not Candidate or not LootableRoot then
 		return
 	end
@@ -2655,7 +2736,6 @@ local function CacheStaticCrateInstance(Instance, LabelHint, Trusted, PreferLabe
 	if not Category then
 		return
 	end
-	RememberCrateMeshSignatures(Candidate, DisplayName)
 
 	local Part = AnchorPart or FindCratePart(LootableRoot) or FindCratePart(Candidate)
 	local Position = GetPartPosition(Part)
@@ -2684,118 +2764,147 @@ local function CacheStaticCrateInstance(Instance, LabelHint, Trusted, PreferLabe
 	}
 end
 
-local function ExpandLearnedCrateMeshes(DisplayName)
-	if CrateMeshExpansionComplete[DisplayName] or not StaticCrateTypeSet[DisplayName] then
-		return
-	end
-	CrateMeshExpansionComplete[DisplayName] = true
-
-	task.spawn(function()
-		local Descendants
-		pcall(function()
-			Descendants = Workspace:GetDescendants()
-		end)
-		for Index, Descendant in Descendants or {} do
-			if not Flags.Running then
-				return
-			end
-			if GetCrateMeshAlias(Descendant) == DisplayName then
-				local AnchorPart = GetCrateMeshAnchor(Descendant)
-				if AnchorPart then
-					pcall(
-						CacheStaticCrateInstance,
-						AnchorPart,
-						DisplayName,
-						true,
-						true,
-						AnchorPart
-					)
-				end
-			end
-			if Index % CRATE_SCAN_YIELD_EVERY == 0 then
-				task.wait()
-			end
-		end
+local function GetClassName(Instance)
+	local ClassName
+	pcall(function()
+		ClassName = Instance.ClassName
 	end)
+	return tostring(ClassName or "Unknown")
 end
 
--- DesertStorm streams map regions. Cache a prompted container once when it
--- becomes visible to the client; its saved world position remains static.
+local function CaptureCrateScannerPrompt(Prompt, DirectTarget)
+	if not Flags.Running or not Flags.CrateScannerEnabled then
+		return
+	end
+
+	local PromptParent = DirectTarget or GetInstanceParent(Prompt)
+	local Candidate = ResolveCrateCandidate(PromptParent) or PromptParent
+	if not Candidate then
+		CrateScannerStatus.Text = "capture failed"
+		return
+	end
+
+	local ObjectText = ""
+	local ActionText = ""
+	if Prompt then
+		pcall(function()
+			ObjectText = tostring(Prompt.ObjectText or "")
+			ActionText = tostring(Prompt.ActionText or "")
+		end)
+	end
+
+	local FullPath = ""
+	pcall(function()
+		FullPath = Candidate:GetFullName()
+	end)
+
+	local Ancestors = {}
+	local Current = Candidate
+	for _ = 1, 8 do
+		if not Current then
+			break
+		end
+		Ancestors[#Ancestors + 1] = GetClassName(Current) .. ":" .. tostring(GetInstanceName(Current))
+		if Current == Workspace then
+			break
+		end
+		Current = GetInstanceParent(Current)
+	end
+
+	local MeshIds = {}
+	local SeenMeshIds = {}
+	local function RecordMesh(Instance)
+		local MeshId = GetCrateMeshSignature(Instance)
+		if MeshId and not SeenMeshIds[MeshId] then
+			SeenMeshIds[MeshId] = true
+			MeshIds[#MeshIds + 1] = MeshId
+		end
+	end
+	RecordMesh(Candidate)
+	local Descendants
+	pcall(function()
+		Descendants = Candidate:GetDescendants()
+	end)
+	for Index, Descendant in Descendants or {} do
+		if Index > 120 then
+			break
+		end
+		RecordMesh(Descendant)
+	end
+
+	local RawName = tostring(GetInstanceName(Candidate) or "Unknown")
+	CrateScannerStatus.Report = table.concat({
+		"visible label: " .. ObjectText,
+		"action: " .. ActionText,
+		"workspace name: " .. RawName,
+		"class: " .. GetClassName(Candidate),
+		"path: " .. FullPath,
+		"ancestors: " .. table.concat(Ancestors, " > "),
+		"mesh ids: " .. (#MeshIds > 0 and table.concat(MeshIds, ", ") or "none"),
+	}, "\n")
+	CrateScannerStatus.Text = RawName
+	warn("case scanner captured:\n" .. CrateScannerStatus.Report)
+end
+
+CopyCrateScannerReport = function()
+	if CrateScannerStatus.Report == "" then
+		CrateScannerStatus.Text = "open a case first"
+		return
+	end
+	local ClipboardWriter = Environment.setclipboard or Environment.toclipboard
+	if type(ClipboardWriter) ~= "function" then
+		CrateScannerStatus.Text = "clipboard unavailable"
+		return
+	end
+	local Success = pcall(ClipboardWriter, CrateScannerStatus.Report)
+	CrateScannerStatus.Text = Success and "copied workspace id" or "copy failed"
+end
+
 pcall(function()
 	local ProximityPromptService = game:GetService("ProximityPromptService")
-	TrackConnection(ProximityPromptService.PromptShown:Connect(function(Prompt)
-		if not Flags.Running or not Flags.CrateEspEnabled then
+	TrackConnection(ProximityPromptService.PromptTriggered:Connect(CaptureCrateScannerPrompt))
+end)
+
+-- F-key fallback for custom interaction systems that do not use
+-- ProximityPromptService. It captures the model under the mouse cursor.
+pcall(function()
+	local UserInputService = game:GetService("UserInputService")
+	TrackConnection(UserInputService.InputBegan:Connect(function(Input)
+		if
+			not Flags.Running
+			or not Flags.CrateScannerEnabled
+			or Input.KeyCode ~= Enum.KeyCode.F
+		then
 			return
 		end
-		local Label = GetLootPromptLabel(Prompt)
-		if Label then
-			pcall(CacheStaticCrateInstance, GetInstanceParent(Prompt), Label, true, true)
-			ExpandLearnedCrateMeshes(CleanCrateName(Label))
+		local Mouse = LocalPlayer:GetMouse()
+		local Target
+		pcall(function()
+			Target = Mouse.Target
+		end)
+		if Target then
+			CaptureCrateScannerPrompt(nil, Target)
 		end
 	end))
 end)
 
--- Cache streamed copies when either an exact hidden-stash alias or a learned
--- mesh signature appears. This never performs another Workspace-wide scan.
+-- Newly streamed instances are checked only by their name. No mesh matching,
+-- metadata expansion, or Workspace-wide rescan runs here.
 pcall(function()
 	TrackConnection(Workspace.DescendantAdded:Connect(function(Instance)
 		if not Flags.Running or not Flags.CrateEspEnabled then
 			return
 		end
-		local MeshAlias = GetCrateMeshAlias(Instance)
-		if MeshAlias then
-			local AnchorPart = GetCrateMeshAnchor(Instance)
-			if AnchorPart then
-				task.defer(function()
-					pcall(
-						CacheStaticCrateInstance,
-						AnchorPart,
-						MeshAlias,
-						true,
-						true,
-						AnchorPart
-					)
-				end)
-				return
-			end
+		local Name = GetInstanceName(Instance)
+		if not IsCrateName(Name) then
+			return
 		end
-
-		local CompactName = CompactCrateText(GetInstanceName(Instance))
-		local StreamedLabel = GetLootPromptLabel(Instance)
-		if
-			not StreamedLabel
-			and (
-				IsInstanceA(Instance, "StringValue")
-				or IsInstanceA(Instance, "ClickDetector")
-				or ContainsAnyToken(GetInstanceName(Instance), LootInteractionTokens)
-				or string.find(CompactName, "prompt", 1, true)
-			)
-		then
-			StreamedLabel = FindStaticCrateMetadataLabel(Instance)
-		end
-		if StreamedLabel then
+		local DisplayName = GetStaticCrateLabelFromText(Name)
+		if DisplayName then
 			task.defer(function()
-				pcall(
-					CacheStaticCrateInstance,
-					GetInstanceParent(Instance),
-					StreamedLabel,
-					true,
-					true
-				)
-				ExpandLearnedCrateMeshes(CleanCrateName(StreamedLabel))
+				pcall(CacheStaticCrateInstance, Instance, DisplayName, true, true)
 			end)
-			return
 		end
-
-		if
-			not string.find(CompactName, "t1stash2", 1, true)
-			and not string.find(CompactName, "tistash2", 1, true)
-		then
-			return
-		end
-		task.defer(function()
-			pcall(CacheStaticCrateInstance, Instance, "Hidden Stash", true, true)
-		end)
 	end))
 end)
 
