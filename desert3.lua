@@ -1,6 +1,10 @@
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
+local ProximityPromptService
+pcall(function()
+	ProximityPromptService = game:GetService("ProximityPromptService")
+end)
 local LocalPlayer = Players.LocalPlayer
 local DESERT_STORM_GAME_ID = 9161571268
 
@@ -1894,33 +1898,38 @@ local function IsContainerMarker(Instance)
 	return false
 end
 
+local ActiveContainerPrompt
 local function GetAimedScannerInstance()
-	local Camera = Workspace.CurrentCamera
-	if Camera then
-		local RaycastResult
-		pcall(function()
-			local Parameters = RaycastParams.new()
-			Parameters.FilterType = Enum.RaycastFilterType.Exclude
-			Parameters.FilterDescendantsInstances = {
-				LocalPlayer.Character,
-				Camera,
-			}
-			RaycastResult = Workspace:Raycast(
-				Camera.CFrame.Position,
-				Camera.CFrame.LookVector * 1000,
-				Parameters
-			)
-		end)
-		if RaycastResult and RaycastResult.Instance then
-			return RaycastResult.Instance
-		end
+	if ActiveContainerPrompt then
+		return ActiveContainerPrompt
 	end
-
 	local Target
 	pcall(function()
 		Target = LocalPlayer:GetMouse().Target
 	end)
-	return Target
+	if Target then
+		return Target
+	end
+
+	local Camera = Workspace.CurrentCamera
+	if not Camera then
+		return nil
+	end
+	local RaycastResult
+	pcall(function()
+		local Parameters = RaycastParams.new()
+		Parameters.FilterType = Enum.RaycastFilterType.Exclude
+		Parameters.FilterDescendantsInstances = {
+			LocalPlayer.Character,
+			Camera,
+		}
+		RaycastResult = Workspace:Raycast(
+			Camera.CFrame.Position,
+			Camera.CFrame.LookVector * 1000,
+			Parameters
+		)
+	end)
+	return RaycastResult and RaycastResult.Instance or nil
 end
 
 local function FindScannerRoot(Target)
@@ -1993,20 +2002,41 @@ local function CollectLocalContainerMarkers(Root)
 	return Matches
 end
 
-local function CaptureAimedContainer()
+local LastScannerCaptureAt = -math.huge
+local LastScannerCapturePath
+local function CaptureAimedContainer(PreferredTarget)
 	if not Flags.CrateScannerEnabled then
 		CrateScannerStatus.Text = "enable scanner first"
 		return
 	end
 
-	local Target = GetAimedScannerInstance()
+	local Target = PreferredTarget or GetAimedScannerInstance()
 	if not Target then
 		CrateScannerStatus.Text = "aim at a case first"
 		return
 	end
+	local TargetPath = GetScannerPath(Target)
+	local Now = tick()
+	if TargetPath == LastScannerCapturePath and Now - LastScannerCaptureAt < 0.25 then
+		return
+	end
+	LastScannerCapturePath = TargetPath
+	LastScannerCaptureAt = Now
 
 	local Root = FindScannerRoot(Target)
 	local Markers = CollectLocalContainerMarkers(Root)
+	if IsContainerMarker(Target) then
+		local AlreadyIncluded = false
+		for _, Marker in ipairs(Markers) do
+			if Marker == Target then
+				AlreadyIncluded = true
+				break
+			end
+		end
+		if not AlreadyIncluded then
+			table.insert(Markers, 1, Target)
+		end
+	end
 	local Lines = {
 		"aimed object: " .. GetScannerPath(Target),
 		"local scanner root: " .. GetScannerPath(Root),
@@ -2071,19 +2101,55 @@ end
 
 local ScannerInputConnection
 pcall(function()
-	ScannerInputConnection = UserInputService.InputBegan:Connect(function(Input, Processed)
+	ScannerInputConnection = UserInputService.InputBegan:Connect(function(Input)
 		if
 			Flags.Running
 			and Flags.CrateScannerEnabled
-			and not Processed
 			and Input.KeyCode == Enum.KeyCode.F
 		then
-			task.defer(CaptureAimedContainer)
+			local Target = ActiveContainerPrompt
+			task.defer(function()
+				CaptureAimedContainer(Target)
+			end)
 		end
 	end)
 end)
 if ScannerInputConnection then
 	TrackConnection(ScannerInputConnection)
+end
+
+if ProximityPromptService then
+	local PromptShownConnection
+	local PromptHiddenConnection
+	local PromptTriggeredConnection
+	pcall(function()
+		PromptShownConnection = ProximityPromptService.PromptShown:Connect(function(Prompt)
+			if IsContainerMarker(Prompt) then
+				ActiveContainerPrompt = Prompt
+			end
+		end)
+		PromptHiddenConnection = ProximityPromptService.PromptHidden:Connect(function(Prompt)
+			if ActiveContainerPrompt == Prompt then
+				ActiveContainerPrompt = nil
+			end
+		end)
+		PromptTriggeredConnection = ProximityPromptService.PromptTriggered:Connect(function(Prompt)
+			if Flags.Running and Flags.CrateScannerEnabled then
+				task.defer(function()
+					CaptureAimedContainer(Prompt)
+				end)
+			end
+		end)
+	end)
+	if PromptShownConnection then
+		TrackConnection(PromptShownConnection)
+	end
+	if PromptHiddenConnection then
+		TrackConnection(PromptHiddenConnection)
+	end
+	if PromptTriggeredConnection then
+		TrackConnection(PromptTriggeredConnection)
+	end
 end
 
 TrackConnection(RunService.RenderStepped:Connect(function()
