@@ -541,7 +541,6 @@ local function AddUiStatusEntrySupport(Source)
 		local Applied
 		Source, Applied = ReplacePlainOnce(Source, Patch[1], Patch[2])
 		if not Applied then
-			warn("UI status-entry patch " .. tostring(PatchIndex) .. " is unavailable; using the stock UI.")
 			return OriginalSource, false
 		end
 	end
@@ -730,6 +729,10 @@ local TargetHitboxDropdown = TargetSection:Dropdown(
 		Flags.TargetParts = SelectedParts
 	end
 ):Tooltip("Enable several hitboxes; the closest enabled point is selected each frame.")
+
+pcall(function()
+	TargetHitboxDropdown:UpdateChoices({ "Head", "Upper Torso", "Stomach", "Legs", "Feet", "Closest" })
+end)
 
 local AimProfiles = {
 	Rifles = {
