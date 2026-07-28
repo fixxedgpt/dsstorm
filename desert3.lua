@@ -510,12 +510,42 @@ local function AddUiStatusEntrySupport(Source)
 	return Source, true
 end
 
+local function AddUiSidebarAvatarLayout(Source)
+	local OriginalSource = Source
+	local Patches = {
+		{
+			[=[elseif aH.iconImg then lI=bh+44 else local lK=string.upper(string.sub(aH.title or"",1,1))if lK~=""then local lL=26;local lM=bh+16+lL/2-4*(1-ll)local lN=bi+22+((aH.subtitle~=""and 30 or 18)-22)*ll;bg(lM-lL/2,lN-lL/2,lL,lL,aH._accentMid,61,7,0.16*g)bs(lM-lL/2,lN-lL/2,lL,lL,as,61,7,av.cardStrk*g)c4(lK,lM,lN,aH._accentMid,15,ay,62,av.text*g)lI=bh+16+lL+9 end end;do local lO=]=],
+			[=[elseif aH.iconImg then lI=bh+44 elseif aH.avatarImg then local lL=26;local lM=bh+16+lL/2-4*(1-ll)local lN=bi+22+((aH.subtitle~=""and 30 or 18)-22)*ll;pcall(function()aH.avatarImg.Position=x(lM-lL/2,lN-lL/2)aH.avatarImg.Size=x(lL,lL)aH.avatarImg.ZIndex=629999;aH.avatarImg.Transparency=g;pcall(function()aH.avatarImg.Rounding=lL/2 end)aH.avatarImg.Visible=g>0.01 end)bA(lM,lN,lL/2,as,63,false,1,28,av.hairline*g)lI=bh+16+lL+9 else lI=bh+16 end;do local lO=]=],
+		},
+		{
+			[=[local my,mz=bh+29,kX+16;if aH.avatarImg then pcall(function()aH.avatarImg.Position=x(my-14,mz-14)aH.avatarImg.Size=x(28,28)aH.avatarImg.ZIndex=629999;aH.avatarImg.Transparency=g;pcall(function()aH.avatarImg.Rounding=14 end)aH.avatarImg.Visible=g>0.01 end)bA(my,mz,14,as,63,false,1,28,av.hairline*g)else bA(my,mz,14,aH._accentMid,61,true,1,28,0.18*g)bA(my,mz,14,as,62,false,1,28,av.hairline*g)local mA=aH._plInitial or"P"local mB=bM(mA,13,ay)bX(mA,my-mB/2,mz-7,as,13,ay,62,false,false,nil,av.text*g)end;bX(jB,bh+50]=],
+			[=[bX(jB,bh+50]=],
+		},
+		{
+			[=[local my,mz=mM-13,mL;if aH.avatarImg then pcall(function()aH.avatarImg.Position=x(my-11,mz-11)aH.avatarImg.Size=x(22,22)aH.avatarImg.ZIndex=169999;aH.avatarImg.Transparency=g;pcall(function()aH.avatarImg.Rounding=11 end)aH.avatarImg.Visible=g>0.01 end)bA(my,mz,11,as,17,false,1,24,av.hairline*g)else local mA=aH._plInitial or string.upper(string.sub(dA and dA.Name or"P",1,1))bA(my,mz,11,aH._accentMid,13,true,1,24,0.18*g)bA(my,mz,11,as,14,false,1,24,av.hairline*g)local mB=bM(mA,12,ay)bX(mA,my-mB/2,mz-6,as,12,ay,15,false,false,nil,av.text*g)end;local jP=bh+14]=],
+			[=[local jP=bh+14]=],
+		},
+	}
+
+	for PatchIndex, Patch in Patches do
+		local Applied
+		Source, Applied = ReplacePlainOnce(Source, Patch[1], Patch[2])
+		if not Applied then
+			warn("UI sidebar-avatar patch " .. tostring(PatchIndex) .. " is unavailable; keeping the stock sidebar layout.")
+			return OriginalSource, false
+		end
+	end
+
+	return Source, true
+end
+
 local function LoadUiLibrary()
 	local Success, Result = pcall(function()
 		local Source = game:HttpGet("https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua")
 		assert(type(Source) == "string" and #Source > 0, "empty UI library response")
 
 		Source, UiStatusEntriesSupported = AddUiStatusEntrySupport(Source)
+		Source = AddUiSidebarAvatarLayout(Source)
 		local Chunk = loadstring(Source)
 		assert(type(Chunk) == "function", "UI library compilation failed")
 
@@ -541,7 +571,7 @@ end
 
 local WindowSuccess, WindowResult = pcall(function()
 	return Lib:CreateWindow({
-		title = "gamesense",
+		title = "virtuosity",
 		subtitle = "DesertStorm extraction",
 		size = Vector2.new(610, 450),
 		menuKey = "lbracket",
