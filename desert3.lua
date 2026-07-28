@@ -1852,6 +1852,8 @@ local CrateEspErrorReported = false
 local CrateEspScanRunning = false
 local CrateEspScanRequested = false
 local CrateEspScanComplete = false
+local CrateMeshAliases = {}
+local CrateMeshExpansionComplete = {}
 local CRATE_SCAN_YIELD_EVERY = 250
 local CRATE_TARGET_LIMIT = 512
 
@@ -1946,6 +1948,73 @@ local function GetInstanceParent(Instance)
 		Parent = Instance and Instance.Parent
 	end)
 	return Parent
+end
+
+local function GetCrateMeshSignature(Instance)
+	local MeshId
+	if IsInstanceA(Instance, "MeshPart") then
+		pcall(function()
+			MeshId = Instance.MeshId
+		end)
+	elseif IsInstanceA(Instance, "SpecialMesh") then
+		pcall(function()
+			MeshId = Instance.MeshId
+		end)
+	end
+	if type(MeshId) ~= "string" or MeshId == "" then
+		return nil
+	end
+	return string.lower(MeshId)
+end
+
+local function RememberCrateMeshSignatures(Instance, DisplayName)
+	if not Instance or not StaticCrateTypeSet[DisplayName] then
+		return
+	end
+
+	local function Remember(Descendant)
+		local Signature = GetCrateMeshSignature(Descendant)
+		if not Signature then
+			return
+		end
+		local ExistingAlias = CrateMeshAliases[Signature]
+		if ExistingAlias and ExistingAlias ~= DisplayName then
+			CrateMeshAliases[Signature] = false
+		elseif ExistingAlias == nil then
+			CrateMeshAliases[Signature] = DisplayName
+		end
+	end
+
+	Remember(Instance)
+	local Descendants
+	pcall(function()
+		Descendants = Instance:GetDescendants()
+	end)
+	for Index, Descendant in Descendants or {} do
+		if Index > 80 then
+			break
+		end
+		Remember(Descendant)
+	end
+end
+
+local function GetCrateMeshAlias(Instance)
+	local Signature = GetCrateMeshSignature(Instance)
+	local Alias = Signature and CrateMeshAliases[Signature]
+	return type(Alias) == "string" and Alias or nil
+end
+
+local function GetCrateMeshAnchor(Instance)
+	if IsInstanceA(Instance, "MeshPart") then
+		return Instance
+	end
+	if IsInstanceA(Instance, "SpecialMesh") then
+		local Parent = GetInstanceParent(Instance)
+		if IsInstanceA(Parent, "BasePart") then
+			return Parent
+		end
+	end
+	return nil
 end
 
 local function IsCrateName(Name)
@@ -2172,6 +2241,80 @@ local function CleanCrateName(Name)
 	return Name
 end
 
+local function GetStaticCrateLabelFromText(Text)
+	if type(Text) ~= "string" or Text == "" then
+		return nil
+	end
+	local DisplayName = CleanCrateName(Text)
+	return StaticCrateTypeSet[DisplayName] and DisplayName or nil
+end
+
+local function GetStaticCrateMetadataLabel(Instance)
+	local Label = GetStaticCrateLabelFromText(GetInstanceName(Instance))
+	if Label then
+		return Label
+	end
+
+	if IsInstanceA(Instance, "ProximityPrompt") then
+		local ObjectText
+		pcall(function()
+			ObjectText = Instance.ObjectText
+		end)
+		Label = GetStaticCrateLabelFromText(ObjectText)
+		if Label then
+			return Label
+		end
+	elseif IsInstanceA(Instance, "StringValue") then
+		local Value
+		pcall(function()
+			Value = Instance.Value
+		end)
+		Label = GetStaticCrateLabelFromText(Value)
+		if Label then
+			return Label
+		end
+	end
+
+	local Attributes
+	pcall(function()
+		Attributes = Instance:GetAttributes()
+	end)
+	for _, Value in Attributes or {} do
+		Label = GetStaticCrateLabelFromText(Value)
+		if Label then
+			return Label
+		end
+	end
+	return nil
+end
+
+local function FindStaticCrateMetadataLabel(Instance)
+	local Current = Instance
+	for _ = 1, 5 do
+		if not Current or Current == Workspace then
+			break
+		end
+
+		local Label = GetStaticCrateMetadataLabel(Current)
+		if Label then
+			return Label
+		end
+
+		local Children
+		pcall(function()
+			Children = Current:GetChildren()
+		end)
+		for _, Child in Children or {} do
+			Label = GetStaticCrateMetadataLabel(Child)
+			if Label then
+				return Label
+			end
+		end
+		Current = GetInstanceParent(Current)
+	end
+	return nil
+end
+
 local function HasHumanoidAncestor(Instance)
 	local Current = Instance
 	for _ = 1, 6 do
@@ -2278,7 +2421,7 @@ local function RefreshCrateTargets()
 	local SeenCandidateIdentities = {}
 	local CandidateChecks = 0
 
-	local function AddCandidate(Instance, LabelHint, TrustedTag, PreferLabelHint)
+	local function AddCandidate(Instance, LabelHint, TrustedTag, PreferLabelHint, AnchorPart)
 		if FoundCount >= CRATE_TARGET_LIMIT then
 			return
 		end
@@ -2293,7 +2436,6 @@ local function RefreshCrateTargets()
 			return
 		end
 
-		local Identity = GetInstanceIdentity(LootableRoot)
 		local CandidateName = GetInstanceName(Candidate)
 		local DisplaySource = PreferLabelHint and LabelHint
 			or (IsCrateName(CandidateName) and CandidateName or LabelHint)
@@ -2302,7 +2444,10 @@ local function RefreshCrateTargets()
 		if not Category then
 			return
 		end
+		RememberCrateMeshSignatures(Candidate, DisplayName)
 
+		local IdentitySource = AnchorPart or LootableRoot
+		local Identity = GetInstanceIdentity(IdentitySource)
 		local SeenTarget = SeenCandidateIdentities[Identity]
 		if SeenTarget then
 			if PreferLabelHint then
@@ -2312,7 +2457,7 @@ local function RefreshCrateTargets()
 			return
 		end
 
-		local Part = FindCratePart(LootableRoot) or FindCratePart(Candidate)
+		local Part = AnchorPart or FindCratePart(LootableRoot) or FindCratePart(Candidate)
 		if not Part then
 			return
 		end
@@ -2365,8 +2510,20 @@ local function RefreshCrateTargets()
 
 			local PromptLabel = GetLootPromptLabel(Descendant)
 			local Name = GetInstanceName(Descendant)
+			local CompactName = CompactCrateText(Name)
+			local MetadataLabel
+			if
+				IsInstanceA(Descendant, "StringValue")
+				or IsInstanceA(Descendant, "ClickDetector")
+				or ContainsAnyToken(Name, LootInteractionTokens)
+				or string.find(CompactName, "prompt", 1, true)
+			then
+				MetadataLabel = FindStaticCrateMetadataLabel(Descendant)
+			end
 			if PromptLabel then
 				AddCandidate(GetInstanceParent(Descendant), PromptLabel, true, true)
+			elseif MetadataLabel then
+				AddCandidate(GetInstanceParent(Descendant), MetadataLabel, true, true)
 			elseif IsCrateName(Name) then
 				if IsInstanceA(Descendant, "Folder") then
 					local Children
@@ -2387,6 +2544,24 @@ local function RefreshCrateTargets()
 		end
 	end
 
+	if DescendantsSuccess and Flags.Running and FoundCount < CRATE_TARGET_LIMIT then
+		for Index, Descendant in Descendants or {} do
+			if not Flags.Running or FoundCount >= CRATE_TARGET_LIMIT then
+				break
+			end
+			local MeshAlias = GetCrateMeshAlias(Descendant)
+			if MeshAlias then
+				local AnchorPart = GetCrateMeshAnchor(Descendant)
+				if AnchorPart then
+					AddCandidate(AnchorPart, MeshAlias, true, true, AnchorPart)
+				end
+			end
+			if Index % CRATE_SCAN_YIELD_EVERY == 0 then
+				task.wait()
+			end
+		end
+	end
+
 	local CollectionService
 	pcall(function()
 		CollectionService = game:GetService("CollectionService")
@@ -2397,15 +2572,21 @@ local function RefreshCrateTargets()
 			Tags = CollectionService:GetTags()
 		end)
 		for _, Tag in Tags or {} do
-			if IsCrateName(Tag) then
+			if IsCrateName(Tag) or ContainsAnyToken(Tag, LootInteractionTokens) then
 				local Tagged
 				pcall(function()
 					Tagged = CollectionService:GetTagged(Tag)
 				end)
 				for _, Instance in Tagged or {} do
+					local MetadataLabel = FindStaticCrateMetadataLabel(Instance)
 					local TrustedTag = IsExplicitLootName(Tag)
 						or ContainsAnyToken(Tag, LootInteractionTokens)
-					AddCandidate(Instance, Tag, TrustedTag, false)
+					AddCandidate(
+						Instance,
+						MetadataLabel or Tag,
+						TrustedTag,
+						MetadataLabel ~= nil
+					)
 				end
 			end
 		end
@@ -2459,7 +2640,7 @@ local function StartCrateEspScan()
 	end)
 end
 
-local function CacheStaticCrateInstance(Instance, LabelHint, Trusted, PreferLabelHint)
+local function CacheStaticCrateInstance(Instance, LabelHint, Trusted, PreferLabelHint, AnchorPart)
 	local Candidate = ResolveCrateCandidate(Instance)
 	local LootableRoot = FindLootableCrateRoot(Candidate, Trusted)
 	if not Candidate or not LootableRoot then
@@ -2474,14 +2655,15 @@ local function CacheStaticCrateInstance(Instance, LabelHint, Trusted, PreferLabe
 	if not Category then
 		return
 	end
+	RememberCrateMeshSignatures(Candidate, DisplayName)
 
-	local Part = FindCratePart(LootableRoot) or FindCratePart(Candidate)
+	local Part = AnchorPart or FindCratePart(LootableRoot) or FindCratePart(Candidate)
 	local Position = GetPartPosition(Part)
 	if not Part or not Position then
 		return
 	end
 
-	local Identity = GetInstanceIdentity(LootableRoot)
+	local Identity = GetInstanceIdentity(AnchorPart or LootableRoot)
 	local ExistingTarget = CrateEspTargets[Identity]
 	if ExistingTarget then
 		if PreferLabelHint then
@@ -2502,6 +2684,41 @@ local function CacheStaticCrateInstance(Instance, LabelHint, Trusted, PreferLabe
 	}
 end
 
+local function ExpandLearnedCrateMeshes(DisplayName)
+	if CrateMeshExpansionComplete[DisplayName] or not StaticCrateTypeSet[DisplayName] then
+		return
+	end
+	CrateMeshExpansionComplete[DisplayName] = true
+
+	task.spawn(function()
+		local Descendants
+		pcall(function()
+			Descendants = Workspace:GetDescendants()
+		end)
+		for Index, Descendant in Descendants or {} do
+			if not Flags.Running then
+				return
+			end
+			if GetCrateMeshAlias(Descendant) == DisplayName then
+				local AnchorPart = GetCrateMeshAnchor(Descendant)
+				if AnchorPart then
+					pcall(
+						CacheStaticCrateInstance,
+						AnchorPart,
+						DisplayName,
+						true,
+						true,
+						AnchorPart
+					)
+				end
+			end
+			if Index % CRATE_SCAN_YIELD_EVERY == 0 then
+				task.wait()
+			end
+		end
+	end)
+end
+
 -- DesertStorm streams map regions. Cache a prompted container once when it
 -- becomes visible to the client; its saved world position remains static.
 pcall(function()
@@ -2513,18 +2730,63 @@ pcall(function()
 		local Label = GetLootPromptLabel(Prompt)
 		if Label then
 			pcall(CacheStaticCrateInstance, GetInstanceParent(Prompt), Label, true, true)
+			ExpandLearnedCrateMeshes(CleanCrateName(Label))
 		end
 	end))
 end)
 
--- Hidden stashes do not always expose an on-screen prompt. This guarded hook
--- only recognizes their exact internal model alias and never rescans Workspace.
+-- Cache streamed copies when either an exact hidden-stash alias or a learned
+-- mesh signature appears. This never performs another Workspace-wide scan.
 pcall(function()
 	TrackConnection(Workspace.DescendantAdded:Connect(function(Instance)
 		if not Flags.Running or not Flags.CrateEspEnabled then
 			return
 		end
+		local MeshAlias = GetCrateMeshAlias(Instance)
+		if MeshAlias then
+			local AnchorPart = GetCrateMeshAnchor(Instance)
+			if AnchorPart then
+				task.defer(function()
+					pcall(
+						CacheStaticCrateInstance,
+						AnchorPart,
+						MeshAlias,
+						true,
+						true,
+						AnchorPart
+					)
+				end)
+				return
+			end
+		end
+
 		local CompactName = CompactCrateText(GetInstanceName(Instance))
+		local StreamedLabel = GetLootPromptLabel(Instance)
+		if
+			not StreamedLabel
+			and (
+				IsInstanceA(Instance, "StringValue")
+				or IsInstanceA(Instance, "ClickDetector")
+				or ContainsAnyToken(GetInstanceName(Instance), LootInteractionTokens)
+				or string.find(CompactName, "prompt", 1, true)
+			)
+		then
+			StreamedLabel = FindStaticCrateMetadataLabel(Instance)
+		end
+		if StreamedLabel then
+			task.defer(function()
+				pcall(
+					CacheStaticCrateInstance,
+					GetInstanceParent(Instance),
+					StreamedLabel,
+					true,
+					true
+				)
+				ExpandLearnedCrateMeshes(CleanCrateName(StreamedLabel))
+			end)
+			return
+		end
+
 		if
 			not string.find(CompactName, "t1stash2", 1, true)
 			and not string.find(CompactName, "tistash2", 1, true)
