@@ -76,6 +76,7 @@ local Flags = {
 	EspMaxDistance = 2500,
 	CrateEspEnabled = false,
 	CrateEspTrackedNames = { "All crates" },
+	CrateEspTrackedOthers = {},
 	CrateEspBox = true,
 	CrateEspBoxStyle = "Corners",
 	CrateEspShowDistance = true,
@@ -101,11 +102,26 @@ local CrateEspStatus = {
 local CrateTrackChoices = {
 	"All crates",
 	"Wooden Crate",
-	"Ammo Crate Large",
-	"T1 Stash",
-	"T2 Stash",
-	"T3 Stash",
+	"Civilian Airdrop",
+	"Duffel Bag",
+	"Ammo Box",
+	"Locked Safe",
+	"Specops Supply Crate",
+	"Supply Crate",
+	"Metal Crate",
+	"Military Laptop",
+	"Double Metal Crates",
 }
+local CrateOtherChoices = { "Hidden Stash" }
+local StaticCrateTypeSet = {}
+for _, Name in CrateTrackChoices do
+	if Name ~= "All crates" then
+		StaticCrateTypeSet[Name] = "Crates"
+	end
+end
+for _, Name in CrateOtherChoices do
+	StaticCrateTypeSet[Name] = "Others"
+end
 local RequestCrateEspScan
 local SilentAimStatus = {
 	Text = "inactive",
@@ -1019,6 +1035,20 @@ CrateTrackDropdown = CrateEspSection:Dropdown(
 	end
 ):Tooltip("Filters the one-time static loot-crate cache; changing this list never rescans the map.")
 
+CrateEspSection:Dropdown(
+	"others",
+	Flags.CrateEspTrackedOthers,
+	CrateOtherChoices,
+	true,
+	function(Value)
+		local SelectedNames = {}
+		for _, Name in Value do
+			SelectedNames[#SelectedNames + 1] = Name
+		end
+		Flags.CrateEspTrackedOthers = SelectedNames
+	end
+):Tooltip("Other fixed loot locations. T1Stash2/TIStash2 is shown as Hidden Stash.")
+
 local CrateBoxToggle = CrateEspSection:Toggle("bounding box", true, function(Value)
 	Flags.CrateEspBox = Value
 end)
@@ -1842,6 +1872,11 @@ local CrateNameTokens = {
 	"itemcase",
 	"cache",
 	"chest",
+	"airdrop",
+	"duffelbag",
+	"ammobox",
+	"lockedsafe",
+	"militarylaptop",
 }
 
 local ExplicitLootNameTokens = {
@@ -1857,6 +1892,11 @@ local ExplicitLootNameTokens = {
 	"lootcase",
 	"itemcase",
 	"cache",
+	"airdrop",
+	"duffelbag",
+	"ammobox",
+	"lockedsafe",
+	"militarylaptop",
 }
 
 local LootInteractionTokens = {
@@ -2085,10 +2125,11 @@ local function CleanCrateName(Name)
 	if string.find(CompactName, "ammocratelarge", 1, true) then
 		return "Ammo Crate Large"
 	end
-	for Tier = 1, 3 do
-		if string.find(CompactName, "t" .. tostring(Tier) .. "stash", 1, true) then
-			return "T" .. tostring(Tier) .. " Stash"
-		end
+	if
+		string.find(CompactName, "t1stash2", 1, true)
+		or string.find(CompactName, "tistash2", 1, true)
+	then
+		return "Hidden Stash"
 	end
 	if string.lower(Name) == "crates" then
 		return "Crate"
@@ -2220,21 +2261,30 @@ local function RefreshCrateTargets()
 			return
 		end
 
+		local Identity = GetInstanceIdentity(LootableRoot)
+		local CandidateName = GetInstanceName(Candidate)
+		local DisplaySource = PreferLabelHint and LabelHint
+			or (IsCrateName(CandidateName) and CandidateName or LabelHint)
+		local DisplayName = CleanCrateName(DisplaySource)
+		local Category = StaticCrateTypeSet[DisplayName]
+		if not Category then
+			return
+		end
+
+		local SeenTarget = SeenCandidateIdentities[Identity]
+		if SeenTarget then
+			if PreferLabelHint then
+				SeenTarget.DisplayName = DisplayName
+				SeenTarget.Category = Category
+			end
+			return
+		end
+
 		local Part = FindCratePart(LootableRoot) or FindCratePart(Candidate)
 		if not Part then
 			return
 		end
 
-		local Identity = GetInstanceIdentity(LootableRoot)
-		if SeenCandidateIdentities[Identity] then
-			return
-		end
-		SeenCandidateIdentities[Identity] = true
-
-		local CandidateName = GetInstanceName(Candidate)
-		local DisplaySource = PreferLabelHint and LabelHint
-			or (IsCrateName(CandidateName) and CandidateName or LabelHint)
-		local DisplayName = CleanCrateName(DisplaySource)
 		local CandidatePosition = GetPartPosition(Part)
 		if not CandidatePosition then
 			return
@@ -2243,26 +2293,31 @@ local function RefreshCrateTargets()
 			local ExistingPosition = ExistingTarget.AnchorPosition
 			if
 				ExistingTarget.DisplayName == DisplayName
+				and ExistingTarget.Category == Category
 				and ExistingPosition
-				and (ExistingPosition - CandidatePosition).Magnitude <= 6
+				and (ExistingPosition - CandidatePosition).Magnitude <= 4
 			then
 				local MemberCount = ExistingTarget.MemberCount or 1
 				ExistingTarget.AnchorPosition = (
 					ExistingPosition * MemberCount + CandidatePosition
 				) / (MemberCount + 1)
 				ExistingTarget.MemberCount = MemberCount + 1
+				SeenCandidateIdentities[Identity] = ExistingTarget
 				return
 			end
 		end
 
-		FoundTargets[Identity] = {
+		local Target = {
 			Instance = LootableRoot,
 			SourceInstance = Candidate,
 			Part = Part,
 			DisplayName = DisplayName,
+			Category = Category,
 			AnchorPosition = CandidatePosition,
 			MemberCount = 1,
 		}
+		FoundTargets[Identity] = Target
+		SeenCandidateIdentities[Identity] = Target
 		FoundCount = FoundCount + 1
 	end
 
@@ -2448,14 +2503,15 @@ local function GetCrateEspBundle(Identity)
 	return Result
 end
 
-local function ShouldTrackCrate(DisplayName)
-	local SelectedNames = Flags.CrateEspTrackedNames
+local function ShouldTrackCrate(Target)
+	local IsOther = Target.Category == "Others"
+	local SelectedNames = IsOther and Flags.CrateEspTrackedOthers or Flags.CrateEspTrackedNames
 	if type(SelectedNames) ~= "table" or #SelectedNames == 0 then
 		return false
 	end
 
 	for _, SelectedName in SelectedNames do
-		if SelectedName == "All crates" or SelectedName == DisplayName then
+		if (not IsOther and SelectedName == "All crates") or SelectedName == Target.DisplayName then
 			return true
 		end
 	end
@@ -2559,7 +2615,7 @@ local function UpdateCrateEspFrame()
 	local ActiveBundles = {}
 	for Identity, Target in CrateEspTargets do
 		FoundCount = FoundCount + 1
-		if ShouldTrackCrate(Target.DisplayName) then
+		if ShouldTrackCrate(Target) then
 			local Position = Target.AnchorPosition
 			if Position then
 				local Distance = (Origin - Position).Magnitude
