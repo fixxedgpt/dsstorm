@@ -47,7 +47,9 @@ local Flags = {
 	SilentMaxDistance = 1800,
 	TeamCheck = false,
 	StickyAim = true,
+	TargetSelectionEnabled = true,
 	FovCheck = true,
+	DrawFov = true,
 	TargetParts = { "Head", "Upper Torso" },
 	AimProfile = "Rifles",
 	AimSmoothness = 20,
@@ -686,11 +688,18 @@ AimbotSection:Toggle("sticky aim", true, function(Value)
 	ClearLock()
 end):Tooltip("Keeps the current target after it leaves the FOV. Releasing the aim key still clears it.")
 
-local FovToggle = TargetSection:Toggle("field of view", true, function(Value)
-	Flags.FovCheck = Value
-end)
+TargetSection:Toggle("enabled", Flags.TargetSelectionEnabled, function(Value)
+	Flags.TargetSelectionEnabled = Value
+	if not Value then
+		ClearLock()
+	end
+end):Tooltip("Master switch for FOV, range, smoothness, hitboxes, and target profiles.")
 
-FovToggle:AddColorpicker("fov color", Flags.FovColor, function(Color, Alpha)
+local DrawFovToggle = TargetSection:Toggle("draw fov", Flags.DrawFov, function(Value)
+	Flags.DrawFov = Value
+end):Tooltip("Show or hide the FOV circle without changing target selection.")
+
+DrawFovToggle:AddColorpicker("fov color", Flags.FovColor, function(Color, Alpha)
 	Flags.FovColor = Color
 	Flags.FovAlpha = Alpha
 end)
@@ -1807,8 +1816,8 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 
 	local Mouse = LocalPlayer:GetMouse()
 	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
-	local ShowAimFov = Flags.Aimbot and Flags.FovCheck
-	local ShowSilentFov = Flags.SilentAim and Flags.SilentFovCheck
+	local ShowAimFov = Flags.DrawFov
+	local ShowSilentFov = Flags.DrawFov and Flags.SilentAim and Flags.SilentFovCheck
 	local ShowFov = ShowAimFov or ShowSilentFov
 	local DisplayFovRadius = 0
 	if ShowAimFov then
@@ -1849,6 +1858,11 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 	end
 
 	if not Flags.Aimbot or not Flags.AimbotActive then
+		ClearLock()
+		return
+	end
+
+	if not Flags.TargetSelectionEnabled then
 		ClearLock()
 		return
 	end
