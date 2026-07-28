@@ -31,6 +31,21 @@ if type(ExistingRuntime) == "table" and type(ExistingRuntime.Unload) == "functio
 	pcall(ExistingRuntime.Unload)
 end
 
+local ExistingUi
+pcall(function()
+	ExistingUi = getgenv().INSui
+end)
+if type(ExistingUi) == "table" and type(ExistingUi.Destroy) == "function" then
+	pcall(function()
+		ExistingUi:Destroy()
+	end)
+end
+pcall(function()
+	if type(setrobloxinput) == "function" then
+		setrobloxinput(true)
+	end
+end)
+
 local Flags = {
 	Running = true,
 	Aimbot = false,
@@ -80,6 +95,7 @@ local Flags = {
 local Connections = {}
 local Drawings = {}
 local Win
+local Lib
 local SilentAim
 local SmoothedAimPosition
 local SmoothedAimTargetName
@@ -133,7 +149,17 @@ function Runtime.Unload()
 		pcall(function()
 			Win:Destroy()
 		end)
+	elseif Lib and type(Lib.Destroy) == "function" then
+		pcall(function()
+			Lib:Destroy()
+		end)
 	end
+
+	pcall(function()
+		if type(setrobloxinput) == "function" then
+			setrobloxinput(true)
+		end
+	end)
 
 	if Environment.__MatchaAimRuntime == Runtime then
 		Environment.__MatchaAimRuntime = nil
@@ -141,6 +167,16 @@ function Runtime.Unload()
 		Environment.UnloadDesertStormAim = nil
 	end
 end
+
+local InitializationComplete = false
+Environment.__MatchaAimRuntime = Runtime
+task.delay(4, function()
+	if InitializationComplete or not Flags.Running then
+		return
+	end
+	warn("Initialization did not complete; releasing the partial UI.")
+	Runtime.Unload()
+end)
 
 local function Clamp(Value, Minimum, Maximum)
 	if Value < Minimum then
@@ -533,15 +569,16 @@ local function LoadUiLibrary()
 	return nil
 end
 
-local Lib = LoadUiLibrary()
+Lib = LoadUiLibrary()
 if not Lib then
 	warn("No UI library is available; aborting cleanly.")
+	Runtime.Unload()
 	return
 end
 
 local WindowSuccess, WindowResult = pcall(function()
 	return Lib:CreateWindow({
-		title = "virtuosity",
+		title = "gamesense",
 		subtitle = "DesertStorm extraction",
 		size = Vector2.new(610, 450),
 		menuKey = "lbracket",
@@ -560,6 +597,7 @@ end)
 
 if not WindowSuccess or not WindowResult then
 	warn("Failed to create the UI window: " .. tostring(WindowResult))
+	Runtime.Unload()
 	return
 end
 
@@ -1866,3 +1904,4 @@ end))
 Environment.SilentAim = SilentAim
 Environment.UnloadDesertStormAim = Runtime.Unload
 Environment.__MatchaAimRuntime = Runtime
+InitializationComplete = true
