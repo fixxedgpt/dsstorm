@@ -76,13 +76,12 @@ local Flags = {
 	EspMaxDistance = 2500,
 	CrateEspEnabled = false,
 	CrateEspTrackedNames = { "All crates" },
-	CrateEspTrackedOthers = {},
 	CrateEspBox = true,
 	CrateEspBoxStyle = "Corners",
 	CrateEspShowDistance = true,
 	CrateEspColor = Color3.fromRGB(214, 176, 72),
 	CrateEspAlpha = 1,
-	CrateEspMaxDistance = 100,
+	CrateEspMaxDistance = 2000,
 	LockedPlayerName = nil,
 }
 
@@ -99,11 +98,7 @@ local EspStatus = {
 local CrateEspStatus = {
 	Text = "off",
 }
-local CrateTrackChoices = {
-	"All crates",
-}
-local CrateOtherChoices = { "Hidden Stash" }
-local StartCrateEspDiscovery
+local CrateTrackChoices = { "All crates" }
 local SilentAimStatus = {
 	Text = "inactive",
 }
@@ -972,10 +967,7 @@ end)
 
 local CrateEspToggle = CrateEspSection:Toggle("enabled", false, function(Value)
 	Flags.CrateEspEnabled = Value
-	CrateEspStatus.Text = Value and "starting..." or "off"
-	if Value and StartCrateEspDiscovery then
-		task.defer(StartCrateEspDiscovery)
-	end
+	CrateEspStatus.Text = Value and "scanning..." or "off"
 end)
 
 CrateEspToggle:AddColorpicker("crate color", Flags.CrateEspColor, function(Color, Alpha)
@@ -983,33 +975,40 @@ CrateEspToggle:AddColorpicker("crate color", Flags.CrateEspColor, function(Color
 	Flags.CrateEspAlpha = Alpha
 end)
 
-CrateEspSection:Dropdown(
+local CrateTrackDropdown
+local UpdatingCrateTrackSelection = false
+CrateTrackDropdown = CrateEspSection:Dropdown(
 	"track crates",
 	Flags.CrateEspTrackedNames,
-	CrateTrackChoices,
+	function()
+		return CrateTrackChoices
+	end,
 	true,
 	function(Value)
+		if UpdatingCrateTrackSelection then
+			return
+		end
+
 		local SelectedNames = {}
-		for _, Name in Value do
-			SelectedNames[#SelectedNames + 1] = Name
+		local NewestName = Value[#Value]
+		if NewestName == "All crates" then
+			SelectedNames[1] = "All crates"
+		else
+			for _, Name in Value do
+				if Name ~= "All crates" then
+					SelectedNames[#SelectedNames + 1] = Name
+				end
+			end
+		end
+
+		if #SelectedNames ~= #Value then
+			UpdatingCrateTrackSelection = true
+			CrateTrackDropdown:Set(SelectedNames)
+			UpdatingCrateTrackSelection = false
 		end
 		Flags.CrateEspTrackedNames = SelectedNames
 	end
-):Tooltip("Confirmed crate types will be added here after their Workspace IDs are captured.")
-
-CrateEspSection:Dropdown(
-	"others",
-	Flags.CrateEspTrackedOthers,
-	CrateOtherChoices,
-	true,
-	function(Value)
-		local SelectedNames = {}
-		for _, Name in Value do
-			SelectedNames[#SelectedNames + 1] = Name
-		end
-		Flags.CrateEspTrackedOthers = SelectedNames
-	end
-):Tooltip("Other fixed loot locations. T1Stash2/TIStash2 is shown as Hidden Stash.")
+):Tooltip("Choose All crates or select the exact discovered crate names you want to track.")
 
 local CrateBoxToggle = CrateEspSection:Toggle("bounding box", true, function(Value)
 	Flags.CrateEspBox = Value
@@ -1807,49 +1806,50 @@ local function UpdateEspFrame()
 	end
 end
 
-local CRATE_SCANNER_TARGET_LIMIT = 128
-local CRATE_SCANNER_REFRESH_INTERVAL = 2
-local CRATE_SCANNER_YIELD_EVERY = 160
-local CrateScannerTokens = {
+local CrateEspBundles = {}
+local CrateEspTargets = {}
+local CrateEspLastScan = -math.huge
+local CrateEspRendererFailed = false
+local CrateEspErrorReported = false
+local CRATE_SCAN_INTERVAL = 3
+local CRATE_TARGET_LIMIT = 256
+
+local CrateNameTokens = {
 	"crate",
-	"container",
-	"duffel",
-	"bag",
-	"case",
 	"stash",
-	"airdrop",
-	"supply",
-	"safe",
-	"loot",
-	"ammo",
-	"storage",
-	"laptop",
-	"box",
+	"container",
+	"lootbox",
+	"lootcrate",
+	"lootable",
+	"supplybox",
+	"supplydrop",
+	"weaponcase",
+	"ammocase",
+	"medicalcase",
+	"medcase",
+	"lootcase",
+	"itemcase",
+	"cache",
+	"chest",
 }
 
-local CrateScannerTargets = {}
-local CrateScannerBundles = {}
-local CrateScannerMetadataCache = {}
-local CrateScannerScanRunning = false
-local CrateScannerErrorReported = false
+local function IsInstanceA(Instance, ClassName)
+	local Result = false
+	pcall(function()
+		Result = Instance and Instance:IsA(ClassName)
+	end)
+	return Result
+end
 
-local function GetScannerName(Instance)
+local function GetInstanceName(Instance)
 	local Name
 	pcall(function()
 		Name = Instance and Instance.Name
 	end)
-	return type(Name) == "string" and Name or ""
+	return type(Name) == "string" and Name or nil
 end
 
-local function GetScannerClass(Instance)
-	local ClassName
-	pcall(function()
-		ClassName = Instance and Instance.ClassName
-	end)
-	return type(ClassName) == "string" and ClassName or "Instance"
-end
-
-local function GetScannerParent(Instance)
+local function GetInstanceParent(Instance)
 	local Parent
 	pcall(function()
 		Parent = Instance and Instance.Parent
@@ -1857,407 +1857,365 @@ local function GetScannerParent(Instance)
 	return Parent
 end
 
-local function ScannerIsA(Instance, ClassName)
-	local Success, Result = pcall(function()
-		return Instance and Instance:IsA(ClassName)
-	end)
-	return Success and Result
-end
+local function IsCrateName(Name)
+	if type(Name) ~= "string" or Name == "" then
+		return false
+	end
 
-local function MatchScannerToken(Instance)
-	local SearchText = string.lower(
-		GetScannerName(Instance) .. " " .. GetScannerClass(Instance)
-	)
-	for _, Token in ipairs(CrateScannerTokens) do
-		if string.find(SearchText, Token, 1, true) then
-			return Token
+	local CompactName = string.lower(Name):gsub("[%s_%-%.]", "")
+	if string.find(CompactName, "template", 1, true) or string.find(CompactName, "spawner", 1, true) then
+		return false
+	end
+
+	for _, Token in CrateNameTokens do
+		if string.find(CompactName, Token, 1, true) then
+			return true
 		end
 	end
-	return nil
+	return false
 end
 
-local function FindScannerPart(Instance)
-	if ScannerIsA(Instance, "BasePart") then
-		return Instance
+local function CleanCrateName(Name)
+	Name = tostring(Name or "Crate")
+	Name = Name:gsub("[_%-]+", " "):gsub("%s+", " ")
+	if string.lower(Name) == "crates" then
+		return "Crate"
 	end
-	local PrimaryPart
-	pcall(function()
-		PrimaryPart = Instance and Instance.PrimaryPart
-	end)
-	if ScannerIsA(PrimaryPart, "BasePart") then
-		return PrimaryPart
+	if string.lower(Name) == "containers" then
+		return "Container"
 	end
-	local Part
-	pcall(function()
-		Part = Instance and Instance:FindFirstChildWhichIsA("BasePart", true)
-	end)
-	return ScannerIsA(Part, "BasePart") and Part or nil
+	return Name
 end
 
-local function FindScannerOwnerModel(Instance)
-	local Cursor = Instance
-	for _ = 1, 7 do
-		if not Cursor or Cursor == Workspace then
+local function HasHumanoidAncestor(Instance)
+	local Current = Instance
+	for _ = 1, 6 do
+		if not Current then
 			break
 		end
-		if ScannerIsA(Cursor, "Model") then
-			return Cursor
+		if SafeFindFirstChild(Current, "Humanoid") then
+			return true
 		end
-		Cursor = GetScannerParent(Cursor)
+		Current = GetInstanceParent(Current)
+	end
+	return false
+end
+
+local function ResolveCrateCandidate(Instance)
+	if not Instance then
+		return nil
+	end
+
+	local Candidate = Instance
+	if not IsInstanceA(Candidate, "Model") and not IsInstanceA(Candidate, "BasePart") then
+		for _ = 1, 6 do
+			Candidate = GetInstanceParent(Candidate)
+			if not Candidate then
+				return nil
+			end
+			if IsInstanceA(Candidate, "Model") or IsInstanceA(Candidate, "BasePart") then
+				break
+			end
+		end
+	end
+
+	if IsInstanceA(Candidate, "BasePart") then
+		local Parent = GetInstanceParent(Candidate)
+		if Parent and IsInstanceA(Parent, "Model") then
+			Candidate = Parent
+		end
+	end
+
+	if HasHumanoidAncestor(Candidate) then
+		return nil
+	end
+	return Candidate
+end
+
+local function FindCratePart(Instance)
+	if not Instance then
+		return nil
+	end
+	if IsInstanceA(Instance, "BasePart") then
+		return Instance
+	end
+
+	local Part
+	pcall(function()
+		Part = Instance.PrimaryPart
+	end)
+	if Part then
+		return Part
+	end
+
+	for _, PartName in { "Main", "Root", "Handle", "Primary", "Base" } do
+		Part = SafeFindFirstChild(Instance, PartName)
+		if Part and IsInstanceA(Part, "BasePart") then
+			return Part
+		end
+	end
+
+	pcall(function()
+		Part = Instance:FindFirstChildWhichIsA("BasePart", true)
+	end)
+	if Part then
+		return Part
+	end
+
+	local Descendants
+	pcall(function()
+		Descendants = Instance:GetDescendants()
+	end)
+	for _, Descendant in Descendants or {} do
+		if IsInstanceA(Descendant, "BasePart") then
+			return Descendant
+		end
 	end
 	return nil
 end
 
-local function GetScannerWorldBounds(Instance, Part)
-	local BoxCFrame
-	local BoxSize
-	if ScannerIsA(Instance, "Model") then
-		pcall(function()
-			BoxCFrame, BoxSize = Instance:GetBoundingBox()
-		end)
-	end
-	if not BoxCFrame or not BoxSize then
-		pcall(function()
-			BoxCFrame = Part.CFrame
-			BoxSize = Part.Size
-		end)
-	end
-	if
-		BoxSize
-		and (BoxSize.X > 80 or BoxSize.Y > 80 or BoxSize.Z > 80)
-	then
-		pcall(function()
-			BoxCFrame = Part.CFrame
-			BoxSize = Part.Size
-		end)
-	end
-	return BoxCFrame, BoxSize
-end
+local function RefreshCrateTargets()
+	local FoundTargets = {}
+	local FoundCount = 0
+	local DiscoveredNames = {}
 
-local function RefreshLiveCrateScanner()
-	if not Flags.Running or not Flags.CrateEspEnabled or CrateScannerScanRunning then
-		return
-	end
-	local RootPart = GetLocalRoot()
-	local Origin = GetPartPosition(RootPart)
-	if not Origin then
-		CrateEspStatus.Text = "player position unavailable"
-		return
+	local function AddCandidate(Instance, LabelHint)
+		if FoundCount >= CRATE_TARGET_LIMIT then
+			return
+		end
+
+		local Candidate = ResolveCrateCandidate(Instance)
+		local Part = FindCratePart(Candidate)
+		if not Candidate or not Part then
+			return
+		end
+
+		local Identity = GetInstanceIdentity(Candidate)
+		if FoundTargets[Identity] then
+			return
+		end
+
+		local CandidateName = GetInstanceName(Candidate)
+		local DisplayName = CleanCrateName(IsCrateName(CandidateName) and CandidateName or LabelHint)
+		FoundTargets[Identity] = {
+			Instance = Candidate,
+			Part = Part,
+			DisplayName = DisplayName,
+		}
+		DiscoveredNames[DisplayName] = true
+		FoundCount = FoundCount + 1
 	end
 
-	CrateScannerScanRunning = true
-	CrateEspStatus.Text = "walking Workspace names..."
-	local Success, ErrorMessage = pcall(function()
-		local Candidates = {}
-		local NewMetadataCache = {}
-		local Queue = { Workspace }
-		local QueueIndex = 1
-		local CheckedCount = 0
-		local PublishedIdentities = {}
-		for _, Target in ipairs(CrateScannerTargets) do
-			PublishedIdentities[Target.Identity] = true
-		end
-
-		local function AddCandidate(Instance)
-			if not Instance or Instance == Workspace then
-				return
-			end
-			local Part = FindScannerPart(Instance)
-			local Position = GetPartPosition(Part)
-			if not Part or not Position then
-				return
-			end
-			local Distance = (Position - Origin).Magnitude
-			if Distance > Flags.CrateEspMaxDistance then
-				return
-			end
-
-			local Identity = GetInstanceIdentity(Instance)
-			local Existing = Candidates[Identity]
-			if Existing and Existing.Distance <= Distance then
-				return
-			end
-			local Metadata = CrateScannerMetadataCache[Identity]
-			if not Metadata or Metadata.Instance ~= Instance then
-				local BoxCFrame, BoxSize = GetScannerWorldBounds(Instance, Part)
-				Metadata = {
-					Instance = Instance,
-					BoundsCFrame = BoxCFrame,
-					BoundsSize = BoxSize,
-				}
-			end
-			NewMetadataCache[Identity] = Metadata
-			local Candidate = {
-				Instance = Instance,
-				Part = Part,
-				Identity = Identity,
-				DisplayName = GetScannerName(Instance),
-				Distance = Distance,
-				BoundsCFrame = Metadata.BoundsCFrame,
-				BoundsSize = Metadata.BoundsSize,
-			}
-			Candidates[Identity] = Candidate
-			if
-				not Existing
-				and not PublishedIdentities[Identity]
-				and #CrateScannerTargets < CRATE_SCANNER_TARGET_LIMIT
-				and Flags.CrateEspEnabled
-			then
-				PublishedIdentities[Identity] = true
-				CrateScannerTargets[#CrateScannerTargets + 1] = Candidate
-				CrateEspStatus.Text = "live "
-					.. tostring(#CrateScannerTargets)
-					.. " IDs ["
-					.. tostring(math.floor(Flags.CrateEspMaxDistance + 0.5))
-					.. "u]"
-			end
-		end
-
-		while QueueIndex <= #Queue do
-			if not Flags.Running or not Flags.CrateEspEnabled then
-				return
-			end
-			local Parent = Queue[QueueIndex]
-			QueueIndex = QueueIndex + 1
-			local Children = {}
-			pcall(function()
-				Children = Parent:GetChildren()
-			end)
-			for _, Child in ipairs(Children) do
-				Queue[#Queue + 1] = Child
-				CheckedCount = CheckedCount + 1
-				local Token = MatchScannerToken(Child)
-				if Token then
-					AddCandidate(Child)
-					local LowerName = string.lower(GetScannerName(Child))
-					if
-						LowerName == "container"
-						or LowerName == "containers"
-						or LowerName == "crate"
-						or LowerName == "crates"
-					then
-						local Owner = FindScannerOwnerModel(Child)
-						if Owner and Owner ~= Child then
-							AddCandidate(Owner)
-						end
-					end
-				end
-				if CheckedCount % CRATE_SCANNER_YIELD_EVERY == 0 then
-					task.wait()
-				end
-			end
-		end
-
-		local Ordered = {}
-		for _, Candidate in pairs(Candidates) do
-			Ordered[#Ordered + 1] = Candidate
-		end
-		table.sort(Ordered, function(A, B)
-			if A.Distance == B.Distance then
-				return A.DisplayName < B.DisplayName
-			end
-			return A.Distance < B.Distance
-		end)
-		while #Ordered > CRATE_SCANNER_TARGET_LIMIT do
-			table.remove(Ordered)
-		end
-
-		if Flags.Running and Flags.CrateEspEnabled then
-			CrateScannerMetadataCache = NewMetadataCache
-			CrateScannerTargets = Ordered
-			CrateEspStatus.Text = "live "
-				.. tostring(#Ordered)
-				.. " IDs ["
-				.. tostring(math.floor(Flags.CrateEspMaxDistance + 0.5))
-				.. "u]"
-		end
+	local Descendants
+	local DescendantsSuccess = pcall(function()
+		Descendants = Workspace:GetDescendants()
 	end)
-	CrateScannerScanRunning = false
+	if DescendantsSuccess then
+		for _, Descendant in Descendants or {} do
+			if FoundCount >= CRATE_TARGET_LIMIT then
+				break
+			end
 
-	if not Success then
-		CrateEspStatus.Text = "Workspace scan unavailable"
-		if not CrateScannerErrorReported then
-			CrateScannerErrorReported = true
-			warn("live 100u Workspace crate scanner failed: " .. tostring(ErrorMessage))
+			local Name = GetInstanceName(Descendant)
+			if IsCrateName(Name) then
+				if IsInstanceA(Descendant, "Folder") then
+					local Children
+					pcall(function()
+						Children = Descendant:GetChildren()
+					end)
+					for _, Child in Children or {} do
+						AddCandidate(Child, Name)
+					end
+				else
+					AddCandidate(Descendant, Name)
+				end
+			end
 		end
 	end
+
+	local CollectionService
+	pcall(function()
+		CollectionService = game:GetService("CollectionService")
+	end)
+	if CollectionService and FoundCount < CRATE_TARGET_LIMIT then
+		local Tags
+		pcall(function()
+			Tags = CollectionService:GetTags()
+		end)
+		for _, Tag in Tags or {} do
+			if IsCrateName(Tag) then
+				local Tagged
+				pcall(function()
+					Tagged = CollectionService:GetTagged(Tag)
+				end)
+				for _, Instance in Tagged or {} do
+					AddCandidate(Instance, Tag)
+				end
+			end
+		end
+	end
+
+	CrateEspTargets = FoundTargets
+	local UpdatedChoices = { "All crates" }
+	for Name in DiscoveredNames do
+		UpdatedChoices[#UpdatedChoices + 1] = Name
+	end
+	table.sort(UpdatedChoices, function(Left, Right)
+		if Left == "All crates" then
+			return true
+		end
+		if Right == "All crates" then
+			return false
+		end
+		return string.lower(Left) < string.lower(Right)
+	end)
+	CrateTrackChoices = UpdatedChoices
 end
 
-StartCrateEspDiscovery = RefreshLiveCrateScanner
-
-local function CreateCrateScannerBundle()
+local function CreateCrateEspBundle()
 	local Bundle = {
 		Label = CreateDrawingObject("Text"),
-		Lines = {},
-		Outlines = {},
+		Box = {},
+		BoxOutline = {},
 	}
-	if not Bundle.Label then
-		return nil
-	end
-	SetTextDefaults(Bundle.Label, true)
-	SetDrawingProperty(Bundle.Label, "ZIndex", 18)
 
-	for Index = 1, 8 do
-		local Outline = CreateDrawingObject("Line")
-		local Line = CreateDrawingObject("Line")
-		if not Outline or not Line then
-			return nil
+	for _ = 1, 8 do
+		local OutlineLine = CreateDrawingObject("Line")
+		if OutlineLine then
+			SetDrawingProperty(OutlineLine, "Thickness", 3)
+			SetDrawingProperty(OutlineLine, "Color", Color3.fromRGB(0, 0, 0))
+			SetDrawingProperty(OutlineLine, "Visible", false)
+			SetDrawingProperty(OutlineLine, "ZIndex", 13)
+			Bundle.BoxOutline[#Bundle.BoxOutline + 1] = OutlineLine
 		end
-		SetDrawingProperty(Outline, "Color", Color3.fromRGB(0, 0, 0))
-		SetDrawingProperty(Outline, "Thickness", 3)
-		SetDrawingProperty(Outline, "Transparency", 0.85)
-		SetDrawingProperty(Outline, "ZIndex", 16)
-		SetDrawingProperty(Outline, "Visible", false)
-		SetDrawingProperty(Line, "Thickness", 1)
-		SetDrawingProperty(Line, "ZIndex", 17)
-		SetDrawingProperty(Line, "Visible", false)
-		Bundle.Outlines[Index] = Outline
-		Bundle.Lines[Index] = Line
+
+		local BoxLine = CreateDrawingObject("Line")
+		if BoxLine then
+			SetDrawingProperty(BoxLine, "Thickness", 1)
+			SetDrawingProperty(BoxLine, "Visible", false)
+			SetDrawingProperty(BoxLine, "ZIndex", 14)
+			Bundle.Box[#Bundle.Box + 1] = BoxLine
+		end
 	end
-	CrateScannerBundles[#CrateScannerBundles + 1] = Bundle
+
+	if not Bundle.Label then
+		assert(false, "Matcha rejected crate Text drawings")
+	end
+
+	SetTextDefaults(Bundle.Label, true)
+	SetDrawingProperty(Bundle.Label, "FontSize", 13)
+	SetDrawingProperty(Bundle.Label, "ZIndex", 15)
 	return Bundle
 end
 
-local function HideCrateScannerBundle(Bundle)
-	SetDrawingProperty(Bundle.Label, "Visible", false)
-	for Index = 1, 8 do
-		SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
-		SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
-	end
-end
-
-local function HideAllCrateScannerBundles()
-	for _, Bundle in ipairs(CrateScannerBundles) do
-		HideCrateScannerBundle(Bundle)
-	end
-end
-
-local function GetProjectedScannerBounds(Target)
-	local BoxCFrame = Target.BoundsCFrame
-	local BoxSize = Target.BoundsSize
-	if not BoxCFrame or not BoxSize then
-		return nil
-	end
-
-	local Half = BoxSize * 0.5
-	local MinX, MinY = math.huge, math.huge
-	local MaxX, MaxY = -math.huge, -math.huge
-	local VisibleCorner = false
-	for _, X in ipairs({ -1, 1 }) do
-		for _, Y in ipairs({ -1, 1 }) do
-			for _, Z in ipairs({ -1, 1 }) do
-				local WorldPoint = BoxCFrame:PointToWorldSpace(Vector3.new(
-					Half.X * X,
-					Half.Y * Y,
-					Half.Z * Z
-				))
-				local ScreenPoint, OnScreen = ProjectToScreen(WorldPoint)
-				if ScreenPoint and ScreenPoint.Z > 0 then
-					MinX = math.min(MinX, ScreenPoint.X)
-					MinY = math.min(MinY, ScreenPoint.Y)
-					MaxX = math.max(MaxX, ScreenPoint.X)
-					MaxY = math.max(MaxY, ScreenPoint.Y)
-					VisibleCorner = VisibleCorner or OnScreen
-				end
-			end
-		end
-	end
-	if MinX == math.huge or not VisibleCorner then
-		return nil
-	end
-	return MinX, MinY, math.max(4, MaxX - MinX), math.max(4, MaxY - MinY)
-end
-
-local function SetScannerLine(Line, From, To, Color, Alpha)
-	SetDrawingProperty(Line, "From", From)
-	SetDrawingProperty(Line, "To", To)
-	SetDrawingProperty(Line, "Color", Color)
-	SetDrawingProperty(Line, "Transparency", Alpha)
-	SetDrawingProperty(Line, "Visible", true)
-end
-
-local function DrawScannerCorners(Bundle, X, Y, Width, Height)
-	local Left = X
-	local Right = X + Width
-	local Top = Y
-	local Bottom = Y + Height
-	local Segments
-	if Flags.CrateEspBoxStyle == "Full" then
-		Segments = {
-			{ Vector2.new(Left, Top), Vector2.new(Right, Top) },
-			{ Vector2.new(Right, Top), Vector2.new(Right, Bottom) },
-			{ Vector2.new(Right, Bottom), Vector2.new(Left, Bottom) },
-			{ Vector2.new(Left, Bottom), Vector2.new(Left, Top) },
-		}
-	else
-		local CornerWidth = math.max(3, Width * 0.25)
-		local CornerHeight = math.max(3, Height * 0.25)
-		Segments = {
-			{ Vector2.new(Left, Top), Vector2.new(Left + CornerWidth, Top) },
-			{ Vector2.new(Left, Top), Vector2.new(Left, Top + CornerHeight) },
-			{ Vector2.new(Right, Top), Vector2.new(Right - CornerWidth, Top) },
-			{ Vector2.new(Right, Top), Vector2.new(Right, Top + CornerHeight) },
-			{ Vector2.new(Left, Bottom), Vector2.new(Left + CornerWidth, Bottom) },
-			{ Vector2.new(Left, Bottom), Vector2.new(Left, Bottom - CornerHeight) },
-			{ Vector2.new(Right, Bottom), Vector2.new(Right - CornerWidth, Bottom) },
-			{ Vector2.new(Right, Bottom), Vector2.new(Right, Bottom - CornerHeight) },
-		}
-	end
-	for Index = 1, 8 do
-		local Segment = Segments[Index]
-		if Segment then
-			SetScannerLine(Bundle.Outlines[Index], Segment[1], Segment[2], Color3.fromRGB(0, 0, 0), 0.85)
-			SetScannerLine(Bundle.Lines[Index], Segment[1], Segment[2], Flags.CrateEspColor, Flags.CrateEspAlpha)
-		else
-			SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
-			SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
-		end
-	end
-end
-
-local function UpdateLiveCrateScannerOverlay()
-	if not Flags.CrateEspEnabled then
-		HideAllCrateScannerBundles()
+local function HideCrateEspBundle(Bundle)
+	if not Bundle then
 		return
 	end
+	if Bundle.Label then
+		Bundle.Label.Visible = false
+	end
+	for _, Line in Bundle.BoxOutline do
+		Line.Visible = false
+	end
+	for _, Line in Bundle.Box do
+		Line.Visible = false
+	end
+end
 
-	local RootPart = GetLocalRoot()
-	local Origin = GetPartPosition(RootPart)
-	local ActiveBundles = {}
-	local BundleIndex = 0
-	for _, Target in ipairs(CrateScannerTargets) do
-		local Position = GetPartPosition(Target.Part)
-		if Position and Origin then
-			local Distance = (Position - Origin).Magnitude
-			if Distance <= Flags.CrateEspMaxDistance then
-				local Center, OnScreen = ProjectToScreen(Position)
-				if Center and Center.Z > 0 and OnScreen then
-					local X, Y, Width, Height = GetProjectedScannerBounds(Target)
-					if X then
-						BundleIndex = BundleIndex + 1
-						local Bundle = CrateScannerBundles[BundleIndex] or CreateCrateScannerBundle()
-						if Bundle then
-							if Flags.CrateEspBox then
-								DrawScannerCorners(Bundle, X, Y, Width, Height)
-							else
-								for Index = 1, 8 do
-									SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
-									SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
-								end
-							end
-							local Label = Target.DisplayName
-							if Flags.CrateEspShowDistance then
-								Label = Label
-									.. "  ["
-									.. tostring(math.floor(Distance + 0.5))
-									.. "u]"
-							end
-							SetDrawingProperty(Bundle.Label, "Text", Label)
-							SetDrawingProperty(Bundle.Label, "Position", Vector2.new(X + Width * 0.5, Y - 15))
-							SetDrawingProperty(Bundle.Label, "Color", Flags.CrateEspColor)
-							SetDrawingProperty(Bundle.Label, "Transparency", Flags.CrateEspAlpha)
-							SetDrawingProperty(Bundle.Label, "Visible", true)
-							ActiveBundles[Bundle] = true
+local function HideAllCrateEspBundles()
+	for _, Bundle in CrateEspBundles do
+		HideCrateEspBundle(Bundle)
+	end
+end
+
+local function GetCrateEspBundle(Identity)
+	local Bundle = CrateEspBundles[Identity]
+	if Bundle then
+		return Bundle
+	end
+	if CrateEspRendererFailed then
+		return nil
+	end
+
+	local Success, Result = pcall(CreateCrateEspBundle)
+	if not Success then
+		CrateEspRendererFailed = true
+		CrateEspStatus.Text = "renderer unavailable"
+		if not CrateEspErrorReported then
+			CrateEspErrorReported = true
+			warn("crate ESP drawing creation failed: " .. tostring(Result))
+		end
+		return nil
+	end
+
+	CrateEspBundles[Identity] = Result
+	return Result
+end
+
+local function ShouldTrackCrate(DisplayName)
+	local SelectedNames = Flags.CrateEspTrackedNames
+	if type(SelectedNames) ~= "table" or #SelectedNames == 0 then
+		return false
+	end
+
+	for _, SelectedName in SelectedNames do
+		if SelectedName == "All crates" or SelectedName == DisplayName then
+			return true
+		end
+	end
+	return false
+end
+
+local function GetCrateScreenBox(Target, Distance)
+	local Part = Target.Part or FindCratePart(Target.Instance)
+	if not Part then
+		return nil
+	end
+
+	local BoundsCFrame
+	local BoundsSize
+	pcall(function()
+		if IsInstanceA(Target.Instance, "Model") then
+			BoundsCFrame, BoundsSize = Target.Instance:GetBoundingBox()
+		end
+	end)
+	if not BoundsCFrame or not BoundsSize then
+		pcall(function()
+			BoundsCFrame = Part.CFrame
+			BoundsSize = Part.Size
+		end)
+	end
+
+	local MinimumX = math.huge
+	local MinimumY = math.huge
+	local MaximumX = -math.huge
+	local MaximumY = -math.huge
+	local ProjectedCount = 0
+	local AnyOnScreen = false
+
+	if BoundsCFrame and BoundsSize then
+		for XSign = -1, 1, 2 do
+			for YSign = -1, 1, 2 do
+				for ZSign = -1, 1, 2 do
+					local WorldPosition
+					pcall(function()
+						WorldPosition = BoundsCFrame
+							* Vector3.new(
+								BoundsSize.X * 0.5 * XSign,
+								BoundsSize.Y * 0.5 * YSign,
+								BoundsSize.Z * 0.5 * ZSign
+							)
+					end)
+					if WorldPosition then
+						local ScreenPosition, OnScreen = ProjectToScreen(WorldPosition)
+						if ScreenPosition then
+							ProjectedCount = ProjectedCount + 1
+							AnyOnScreen = AnyOnScreen or OnScreen
+							MinimumX = math.min(MinimumX, ScreenPosition.X)
+							MinimumY = math.min(MinimumY, ScreenPosition.Y)
+							MaximumX = math.max(MaximumX, ScreenPosition.X)
+							MaximumY = math.max(MaximumY, ScreenPosition.Y)
 						end
 					end
 				end
@@ -2265,34 +2223,191 @@ local function UpdateLiveCrateScannerOverlay()
 		end
 	end
 
-	for _, Bundle in ipairs(CrateScannerBundles) do
-		if not ActiveBundles[Bundle] then
-			HideCrateScannerBundle(Bundle)
+	if ProjectedCount >= 2 and AnyOnScreen then
+		local Width = MaximumX - MinimumX
+		local Height = MaximumY - MinimumY
+		if Width >= 3 and Height >= 3 and Width < 2000 and Height < 2000 then
+			return MinimumX, MinimumY, Width, Height
+		end
+	end
+
+	local Position = GetPartPosition(Part)
+	local ScreenPosition, OnScreen = ProjectToScreen(Position)
+	if not ScreenPosition or not OnScreen then
+		return nil
+	end
+	local Height = Clamp(1100 / math.max(Distance, 1), 12, 70)
+	local Width = Height * 1.25
+	return ScreenPosition.X - Width * 0.5, ScreenPosition.Y - Height * 0.5, Width, Height
+end
+
+local function BuildFullBoxSegments(X, Y, Width, Height)
+	return {
+		{ Vector2.new(X, Y), Vector2.new(X + Width, Y) },
+		{ Vector2.new(X + Width, Y), Vector2.new(X + Width, Y + Height) },
+		{ Vector2.new(X + Width, Y + Height), Vector2.new(X, Y + Height) },
+		{ Vector2.new(X, Y + Height), Vector2.new(X, Y) },
+	}
+end
+
+local function BuildCornerBoxSegments(X, Y, Width, Height)
+	local CornerLength = math.max(math.min(Width, Height) * 0.28, 4)
+	CornerLength = math.min(CornerLength, Width * 0.5, Height * 0.5)
+	return {
+		{ Vector2.new(X, Y), Vector2.new(X + CornerLength, Y) },
+		{ Vector2.new(X, Y), Vector2.new(X, Y + CornerLength) },
+		{ Vector2.new(X + Width - CornerLength, Y), Vector2.new(X + Width, Y) },
+		{ Vector2.new(X + Width, Y), Vector2.new(X + Width, Y + CornerLength) },
+		{ Vector2.new(X, Y + Height), Vector2.new(X + CornerLength, Y + Height) },
+		{ Vector2.new(X, Y + Height - CornerLength), Vector2.new(X, Y + Height) },
+		{ Vector2.new(X + Width - CornerLength, Y + Height), Vector2.new(X + Width, Y + Height) },
+		{ Vector2.new(X + Width, Y + Height - CornerLength), Vector2.new(X + Width, Y + Height) },
+	}
+end
+
+local function SetCrateBoxSegments(Lines, Segments, Color, Alpha)
+	for Index, Line in Lines do
+		local Segment = Segments[Index]
+		if Segment then
+			Line.From = Segment[1]
+			Line.To = Segment[2]
+			Line.Color = Color
+			Line.Transparency = Alpha
+			Line.Visible = true
+		else
+			Line.Visible = false
 		end
 	end
 end
 
-local ScannerRefreshAccumulator = CRATE_SCANNER_REFRESH_INTERVAL
-TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
-	if not Flags.Running then
+local function UpdateCrateEspFrame()
+	if not Flags.Running or not Flags.CrateEspEnabled then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "off"
 		return
 	end
-	if not Flags.CrateEspEnabled then
-		ScannerRefreshAccumulator = CRATE_SCANNER_REFRESH_INTERVAL
-		CrateScannerTargets = {}
-		CrateScannerMetadataCache = {}
+	if CrateEspRendererFailed then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "renderer unavailable"
 		return
 	end
-	if CrateScannerScanRunning then
-		ScannerRefreshAccumulator = 0
+
+	local Now = tick()
+	if Now - CrateEspLastScan >= CRATE_SCAN_INTERVAL then
+		CrateEspLastScan = Now
+		local ScanSuccess, ScanError = pcall(RefreshCrateTargets)
+		if not ScanSuccess then
+			CrateEspStatus.Text = "scan unavailable"
+			if not CrateEspErrorReported then
+				CrateEspErrorReported = true
+				warn("crate ESP scan failed: " .. tostring(ScanError))
+			end
+		end
+	end
+
+	local Camera = Workspace.CurrentCamera
+	if not Camera then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "waiting for camera"
 		return
 	end
-	ScannerRefreshAccumulator = ScannerRefreshAccumulator + DeltaTime
-	if ScannerRefreshAccumulator >= CRATE_SCANNER_REFRESH_INTERVAL then
-		ScannerRefreshAccumulator = 0
-		task.defer(RefreshLiveCrateScanner)
+
+	local Origin = GetPartPosition(GetLocalRoot())
+	if not Origin then
+		pcall(function()
+			Origin = Camera.Position
+		end)
 	end
-end))
+	if not Origin then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "waiting for position"
+		return
+	end
+
+	local FoundCount = 0
+	local DrawnCount = 0
+	local ActiveBundles = {}
+	for Identity, Target in CrateEspTargets do
+		FoundCount = FoundCount + 1
+		if ShouldTrackCrate(Target.DisplayName) then
+			local Part = Target.Part
+			local Position = GetPartPosition(Part)
+			if not Position then
+				Part = FindCratePart(Target.Instance)
+				Target.Part = Part
+				Position = GetPartPosition(Part)
+			end
+			if Position then
+				local Distance = (Origin - Position).Magnitude
+				if Distance <= Flags.CrateEspMaxDistance then
+					local ScreenPosition, OnScreen = ProjectToScreen(Position + Vector3.new(0, 1.25, 0))
+					if OnScreen and ScreenPosition then
+						local Bundle = GetCrateEspBundle(Identity)
+						if Bundle and Bundle.Label then
+							local BoxX
+							local BoxY
+							local BoxWidth
+							local BoxHeight
+							if Flags.CrateEspBox then
+								BoxX, BoxY, BoxWidth, BoxHeight = GetCrateScreenBox(Target, Distance)
+							end
+
+							if BoxX then
+								local Segments
+								if Flags.CrateEspBoxStyle == "Full" then
+									Segments = BuildFullBoxSegments(BoxX, BoxY, BoxWidth, BoxHeight)
+								else
+									Segments = BuildCornerBoxSegments(BoxX, BoxY, BoxWidth, BoxHeight)
+								end
+								SetCrateBoxSegments(
+									Bundle.BoxOutline,
+									Segments,
+									Color3.fromRGB(0, 0, 0),
+									Flags.CrateEspAlpha
+								)
+								SetCrateBoxSegments(
+									Bundle.Box,
+									Segments,
+									Flags.CrateEspColor,
+									Flags.CrateEspAlpha
+								)
+							else
+								for _, Line in Bundle.BoxOutline do
+									Line.Visible = false
+								end
+								for _, Line in Bundle.Box do
+									Line.Visible = false
+								end
+							end
+
+							local Text = Target.DisplayName or "Crate"
+							if Flags.CrateEspShowDistance then
+								Text = Text .. "  [" .. tostring(math.floor(Distance + 0.5)) .. "u]"
+							end
+							Bundle.Label.Text = Text
+							Bundle.Label.Position = BoxX
+									and Vector2.new(BoxX + BoxWidth * 0.5, BoxY - 15)
+								or ScreenPosition
+							Bundle.Label.Color = Flags.CrateEspColor
+							Bundle.Label.Transparency = Flags.CrateEspAlpha
+							Bundle.Label.Visible = true
+							ActiveBundles[Bundle] = true
+							DrawnCount = DrawnCount + 1
+						end
+					end
+				end
+			end
+		end
+	end
+
+	for _, Bundle in CrateEspBundles do
+		if not ActiveBundles[Bundle] then
+			HideCrateEspBundle(Bundle)
+		end
+	end
+
+	CrateEspStatus.Text = tostring(DrawnCount) .. "/" .. tostring(FoundCount) .. " drawn"
+end
 
 TrackConnection(RunService.RenderStepped:Connect(function()
 	if not Flags.Running then
@@ -2304,12 +2419,13 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 		ReportEspError("ESP frame failed", ErrorMessage)
 	end
 
-	local ScannerSuccess, ScannerError = pcall(UpdateLiveCrateScannerOverlay)
-	if not ScannerSuccess then
-		HideAllCrateScannerBundles()
-		if not CrateScannerErrorReported then
-			CrateScannerErrorReported = true
-			warn("live crate scanner overlay failed: " .. tostring(ScannerError))
+	local CrateSuccess, CrateError = pcall(UpdateCrateEspFrame)
+	if not CrateSuccess then
+		HideAllCrateEspBundles()
+		CrateEspStatus.Text = "update unavailable"
+		if not CrateEspErrorReported then
+			CrateEspErrorReported = true
+			warn("crate ESP update failed: " .. tostring(CrateError))
 		end
 	end
 end))
