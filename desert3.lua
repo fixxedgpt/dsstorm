@@ -79,8 +79,6 @@ local Flags = {
 	EspTextColor = Color3.fromRGB(235, 235, 235),
 	EspTextAlpha = 1,
 	EspMaxDistance = 2500,
-	IngameRadio = false,
-	IngameRadioVolume = 50,
 	LockedPlayerName = nil,
 }
 
@@ -89,6 +87,7 @@ local Drawings = {}
 local Win
 local Lib
 local SilentAim
+local LockedPlayer
 local SmoothedAimPosition
 local SmoothedAimTargetName
 local EspStatus = {
@@ -98,84 +97,6 @@ local EspStatus = {
 local SilentAimStatus = {
 	Text = "inactive",
 }
-local RadioStatus = {
-	Text = "checking Windows media controls...",
-}
-
-local function GetEnvironmentFunction(Name)
-	local Candidate
-	pcall(function()
-		Candidate = Environment[Name]
-	end)
-	if type(Candidate) ~= "function" then
-		pcall(function()
-			Candidate = getgenv()[Name]
-		end)
-	end
-	if type(Candidate) ~= "function" then
-		pcall(function()
-			Candidate = _G[Name]
-		end)
-	end
-	return type(Candidate) == "function" and Candidate or nil
-end
-
-local WindowsKeyPress = GetEnvironmentFunction("keypress")
-local WindowsKeyRelease = GetEnvironmentFunction("keyrelease")
-local WindowsMediaAvailable = WindowsKeyPress ~= nil and WindowsKeyRelease ~= nil
-local WindowsMediaKeys = {
-	VolumeDown = 0xAE,
-	VolumeUp = 0xAF,
-	Stop = 0xB2,
-	PlayPause = 0xB3,
-}
-
-RadioStatus.Text = WindowsMediaAvailable and "Windows media controls ready" or "media-key API unavailable"
-
-local function TapWindowsMediaKey(KeyCode)
-	if not Flags.Running or not WindowsMediaAvailable then
-		return false
-	end
-
-	local Success = pcall(function()
-		WindowsKeyPress(KeyCode)
-		task.wait(0.015)
-		WindowsKeyRelease(KeyCode)
-	end)
-	if not Success then
-		RadioStatus.Text = "Windows media command failed"
-	end
-	return Success
-end
-
-local PendingVolumeDelta = 0
-local VolumeWorkerRunning = false
-
-local function QueueWindowsVolumeDelta(Delta)
-	PendingVolumeDelta = PendingVolumeDelta + Delta
-	if math.abs(PendingVolumeDelta) < 2 then
-		return
-	end
-
-	if VolumeWorkerRunning then
-		return
-	end
-
-	VolumeWorkerRunning = true
-	task.spawn(function()
-		while Flags.Running and math.abs(PendingVolumeDelta) >= 2 do
-			local StepDirection = PendingVolumeDelta > 0 and 1 or -1
-			PendingVolumeDelta = PendingVolumeDelta - (StepDirection * 2)
-			if not TapWindowsMediaKey(
-				StepDirection > 0 and WindowsMediaKeys.VolumeUp or WindowsMediaKeys.VolumeDown
-			) then
-				PendingVolumeDelta = 0
-				break
-			end
-		end
-		VolumeWorkerRunning = false
-	end)
-end
 
 local Runtime = {}
 
@@ -189,10 +110,15 @@ local function TrackDrawing(DrawingObject)
 	return DrawingObject
 end
 
-local function ClearLock()
-	Flags.LockedPlayerName = nil
+local function ClearAimSmoothing()
 	SmoothedAimPosition = nil
 	SmoothedAimTargetName = nil
+end
+
+local function ClearLock()
+	LockedPlayer = nil
+	Flags.LockedPlayerName = nil
+	ClearAimSmoothing()
 end
 
 function Runtime.Unload()
@@ -425,12 +351,16 @@ local function BuildTarget(Player)
 end
 
 local function GetLockedTarget()
+	if LockedPlayer then
+		return BuildTarget(LockedPlayer)
+	end
+
 	if not Flags.LockedPlayerName then
 		return nil
 	end
-
 	for _, Player in Players:GetPlayers() do
 		if Player.Name == Flags.LockedPlayerName then
+			LockedPlayer = Player
 			return BuildTarget(Player)
 		end
 	end
@@ -1073,32 +1003,6 @@ end):Tooltip("Player ESP range in Roblox studs.")
 
 EspRangeSection:Label(function()
 	return "status: " .. EspStatus.Text
-end)
-
-local MiscTab = Win:Tab("MISC", "code")
-local RadioSection = MiscTab:Section("radio", "Left")
-
-local IngameRadioToggle = RadioSection:Toggle("Ingame Radio", Flags.IngameRadio, function(Value)
-	Flags.IngameRadio = Value
-	local MediaKey = Value and WindowsMediaKeys.PlayPause or WindowsMediaKeys.Stop
-	if TapWindowsMediaKey(MediaKey) then
-		RadioStatus.Text = Value and "play command sent to Windows" or "music stopped"
-	end
-end):Tooltip("On sends play/pause; off sends Windows' dedicated media-stop key. Windows routes the command to Spotify when it owns the active media session.")
-
-local IngameRadioVolumeSlider = RadioSection:Slider("volume", Flags.IngameRadioVolume, 1, 0, 100, "%", function(Value)
-	local PreviousVolume = Flags.IngameRadioVolume
-	Flags.IngameRadioVolume = Value
-	QueueWindowsVolumeDelta(Value - PreviousVolume)
-end):Tooltip("Adjusts Windows master volume with media keys; it is not Spotify-only.")
-
-pcall(function()
-	IngameRadioToggle.item.noSave = true
-	IngameRadioVolumeSlider.item.noSave = true
-end)
-
-RadioSection:Label(function()
-	return "status: " .. RadioStatus.Text
 end)
 
 local SettingsTab = Win:AddSettingsTab("cog")
@@ -1955,28 +1859,30 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 	end
 
 	local Target
-	if Flags.StickyAim then
+	local HasStickyLock = Flags.StickyAim and (LockedPlayer ~= nil or Flags.LockedPlayerName ~= nil)
+	if HasStickyLock then
 		Target = GetLockedTarget()
-	end
-
-	if not Target then
-		Flags.LockedPlayerName = nil
+		if not Target then
+			ClearAimSmoothing()
+			return
+		end
+	else
 		Target = FindClosestTarget()
 		if Target and Flags.StickyAim then
+			LockedPlayer = Target.Player
 			Flags.LockedPlayerName = Target.Player.Name
 		end
 	end
 
 	if not Target then
-		SmoothedAimPosition = nil
-		SmoothedAimTargetName = nil
+		ClearAimSmoothing()
 		return
 	end
 
 	local CameraPosition = Camera.Position
 	local AimPosition = PredictTargetPosition(Target, CameraPosition)
 	if not AimPosition then
-		ClearLock()
+		ClearAimSmoothing()
 		return
 	end
 
@@ -2008,7 +1914,7 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 		Camera.lookAt(CameraPosition, LookPosition)
 	end)
 	if not AimSuccess then
-		ClearLock()
+		ClearAimSmoothing()
 	end
 end))
 
