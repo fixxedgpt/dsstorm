@@ -602,6 +602,9 @@ if not WindowSuccess or not WindowResult then
 end
 
 Win = WindowResult
+pcall(function()
+	Win:SetTitle("virtuosity")
+end)
 
 local GamesenseGreen = Color3.fromRGB(149, 192, 33)
 local ThemeSuccess, ThemeError = pcall(function()
@@ -1061,13 +1064,13 @@ local function ReportEspError(Prefix, ErrorMessage)
 	EspStatus.LastError = FullMessage
 	EspStatus.Text = "error: " .. string.sub(tostring(ErrorMessage), 1, 38)
 	if not EspErrorReported then
-		EspErrorReported = true
-		warn(FullMessage)
-		pcall(function()
-			if type(notify) == "function" then
-				notify(FullMessage, "gamesense ESP", 8)
-			end
-		end)
+			EspErrorReported = true
+			warn(FullMessage)
+			pcall(function()
+				if type(notify) == "function" then
+					notify(FullMessage, "virtuosity ESP", 8)
+				end
+			end)
 	end
 end
 
