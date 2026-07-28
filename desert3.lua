@@ -2,20 +2,10 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
-local DESERT_STORM_GAME_ID = 9161571268
 
 if not LocalPlayer then
 	warn("LocalPlayer is unavailable; aborting cleanly.")
 	return
-end
-
-local ActiveGameId
-pcall(function()
-	ActiveGameId = game.GameId
-end)
-
-if ActiveGameId and ActiveGameId ~= DESERT_STORM_GAME_ID then
-	warn("DesertStorm aim profile loaded outside its intended universe; settings may need adjustment.")
 end
 
 local Environment = _G
@@ -251,6 +241,17 @@ local function ProjectToScreen(Position)
 	return ScreenPosition, OnScreen
 end
 
+local LegPartNames = {
+	"Left Leg",
+	"Right Leg",
+	"LeftUpperLeg",
+	"RightUpperLeg",
+	"LeftLowerLeg",
+	"RightLowerLeg",
+	"LeftFoot",
+	"RightFoot",
+}
+
 local function ResolveTargetPart(Character, Head, RootPart, UpperTorso)
 	local Mouse = LocalPlayer:GetMouse()
 	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
@@ -292,8 +293,12 @@ local function ResolveTargetPart(Character, Head, RootPart, UpperTorso)
 			ConsiderPart(Head)
 		elseif PartName == "Upper Torso" then
 			ConsiderPart(UpperTorso)
-		elseif PartName == "Humanoid Root Part" then
+		elseif PartName == "Stomach" or PartName == "Humanoid Root Part" then
 			ConsiderPart(RootPart)
+		elseif PartName == "Legs" then
+			for _, LegPartName in LegPartNames do
+				ConsiderPart(Character:FindFirstChild(LegPartName))
+			end
 		elseif PartName == "Closest" then
 			for _, Part in Character:GetChildren() do
 				if Part:IsA("BasePart") then
@@ -716,7 +721,7 @@ local SmoothnessSlider = TargetSection:Slider(
 local TargetHitboxDropdown = TargetSection:Dropdown(
 	"target hitboxes",
 	Flags.TargetParts,
-	{ "Head", "Upper Torso", "Humanoid Root Part", "Closest" },
+	{ "Head", "Upper Torso", "Stomach", "Legs", "Closest" },
 	true,
 	function(Value)
 		local SelectedParts = {}
@@ -746,7 +751,7 @@ local AimProfiles = {
 	Hybrid = {
 		FovRadius = 100,
 		MaxDistance = 2500,
-		Hitboxes = { "Head", "Upper Torso", "Humanoid Root Part" },
+		Hitboxes = { "Head", "Upper Torso", "Stomach" },
 		Smoothness = 25,
 	},
 }
