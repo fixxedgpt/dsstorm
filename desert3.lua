@@ -2,20 +2,10 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
-local DESERT_STORM_GAME_ID = 9161571268
 
 if not LocalPlayer then
 	warn("LocalPlayer is unavailable; aborting cleanly.")
 	return
-end
-
-local ActiveGameId
-pcall(function()
-	ActiveGameId = game.GameId
-end)
-
-if ActiveGameId and ActiveGameId ~= DESERT_STORM_GAME_ID then
-	warn("DesertStorm aim profile loaded outside its intended universe; settings may need adjustment.")
 end
 
 local Environment = _G
@@ -531,16 +521,12 @@ local function AddUiStatusEntrySupport(Source)
 			[=[if eh and eh.value and not eh.statusOnly and not eh.listening and not e1(dU)then]=],
 		},
 		{
-			[=[bg(ch,bi,cj,bk,cg[ae],aZ,0,bn)ch=ci end end;function aH.fadeLine]=],
-			[=[bg(ch,bi,cj,bk,cg[ae],aZ,0,bn)ch=ci end end;local function cbar(bh,bi,bj,bn,aZ)local bw=(bj-2)/3;bg(bh+1,bi+1,bj-2,3,y(0,0,0),aZ,0,bn)cb(bh+1,bi+1,bw,2,y(72,149,184),y(151,95,172),aZ+1,bn)cb(bh+1+bw,bi+1,bw,2,y(151,95,172),y(202,86,94),aZ+1,bn)cb(bh+1+bw*2,bi+1,bw,2,y(202,86,94),y(156,192,73),aZ+1,bn)end;function aH.fadeLine]=],
-		},
-		{
 			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)if ld then]=],
-			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)cbar(bh,bi,bj,g,89)if ld then]=],
+			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)bg(bh+1,bi+1,bj-2,3,y(0,0,0),89,0,g)cb(bh+1,bi+1,(bj-2)/3,2,y(72,149,184),y(151,95,172),90,g)cb(bh+1+(bj-2)/3,bi+1,(bj-2)/3,2,y(151,95,172),y(202,86,94),90,g)cb(bh+1+2*(bj-2)/3,bi+1,(bj-2)/3,2,y(202,86,94),y(156,192,73),90,g)if ld then]=],
 		},
 		{
 			[=[bs(bh,bi,bj,bk,as,151,8,av.cardStrk*ag)bX("keybinds"]=],
-			[=[bs(bh,bi,bj,bk,as,151,8,av.cardStrk*ag)cbar(bh,bi,bj,ag,154)bX("keybinds"]=],
+			[=[bs(bh,bi,bj,bk,as,151,8,av.cardStrk*ag)bg(bh+1,bi+1,bj-2,3,y(0,0,0),154,0,ag)cb(bh+1,bi+1,(bj-2)/3,2,y(72,149,184),y(151,95,172),155,ag)cb(bh+1+(bj-2)/3,bi+1,(bj-2)/3,2,y(151,95,172),y(202,86,94),155,ag)cb(bh+1+2*(bj-2)/3,bi+1,(bj-2)/3,2,y(202,86,94),y(156,192,73),155,ag)bX("keybinds"]=],
 		},
 	}
 
