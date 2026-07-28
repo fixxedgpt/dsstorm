@@ -64,6 +64,7 @@ local Flags = {
 	FovAlpha = 1,
 	EspEnabled = false,
 	EspTeamCheck = false,
+	EspVisibleOnly = false,
 	EspBox = true,
 	EspBoxColor = Color3.fromRGB(235, 235, 235),
 	EspBoxAlpha = 1,
@@ -949,6 +950,10 @@ EspPlayerSection:Toggle("Roblox team check", false, function(Value)
 	Flags.EspTeamCheck = Value
 end):Tooltip("Roblox teams only; this may not match DesertStorm squads.")
 
+EspPlayerSection:Toggle("visible only", false, function(Value)
+	Flags.EspVisibleOnly = Value
+end):Tooltip("Only draw a player when the camera has a clear line of sight to their head or body.")
+
 local BoxToggle = EspPlayerSection:Toggle("bounding box", true, function(Value)
 	Flags.EspBox = Value
 end)
@@ -1039,6 +1044,7 @@ end)
 local EspBundles = {}
 local EspTargetCache = {}
 local EspWeaponCache = {}
+local EspVisibilityCache = {}
 local EspErrorReported = false
 local EspRendererFailed = false
 local EspSkippedProperties = {}
@@ -1298,6 +1304,119 @@ local function IsEspTeammate(Player)
 		return Player.Team ~= nil and Player.Team == LocalPlayer.Team
 	end)
 	return Success and Result
+end
+
+local function IsEspTargetVisible(Target, Camera)
+	if not Flags.EspVisibleOnly then
+		return true
+	end
+
+	local PlayerIdentity = GetPlayerIdentity(Target.Player)
+	local Now = tick()
+	local Cached = EspVisibilityCache[PlayerIdentity]
+	if
+		Cached
+		and Cached.Character == Target.Character
+		and Now < Cached.ExpiresAt
+	then
+		return Cached.Visible
+	end
+
+	local WasVisible = not Cached or Cached.Character ~= Target.Character or Cached.Visible
+	local CameraPosition
+	pcall(function()
+		CameraPosition = Camera.Position
+	end)
+	if not CameraPosition then
+		return WasVisible
+	end
+
+	local IgnoreList = {}
+	local LocalCharacter
+	pcall(function()
+		LocalCharacter = LocalPlayer.Character
+	end)
+	if LocalCharacter then
+		IgnoreList[#IgnoreList + 1] = LocalCharacter
+	end
+	if Target.Character then
+		IgnoreList[#IgnoreList + 1] = Target.Character
+	end
+	if Camera then
+		IgnoreList[#IgnoreList + 1] = Camera
+	end
+
+	local Params
+	local ParamsSuccess = pcall(function()
+		Params = RaycastParams.new()
+		Params.FilterType = Enum.RaycastFilterType.Exclude
+		Params.FilterDescendantsInstances = IgnoreList
+		Params.IgnoreWater = true
+	end)
+	if not ParamsSuccess or not Params then
+		return WasVisible
+	end
+
+	local HeadPosition = GetPartPosition(Target.Head)
+	local RootPosition = GetPartPosition(Target.RootPart)
+	local SamplePositions = {}
+	if HeadPosition then
+		SamplePositions[#SamplePositions + 1] = HeadPosition
+	end
+	if HeadPosition and RootPosition then
+		SamplePositions[#SamplePositions + 1] = HeadPosition:Lerp(RootPosition, 0.55)
+	end
+	if RootPosition then
+		SamplePositions[#SamplePositions + 1] = RootPosition
+	end
+
+	local Visible = false
+	local RaycastWorked = false
+	for _, SamplePosition in SamplePositions do
+		local Direction = SamplePosition - CameraPosition
+		if Direction.Magnitude <= 0.05 then
+			Visible = true
+			RaycastWorked = true
+			break
+		end
+
+		local Success, Result = pcall(function()
+			return Workspace:Raycast(CameraPosition, Direction, Params)
+		end)
+		if Success then
+			RaycastWorked = true
+			if not Result then
+				Visible = true
+				break
+			end
+		end
+	end
+
+	if not RaycastWorked then
+		return WasVisible
+	end
+
+	local ClearLine = Visible
+	local BlockedChecks = 0
+	if not ClearLine then
+		BlockedChecks = (
+			Cached
+			and Cached.Character == Target.Character
+			and (Cached.BlockedChecks or 0)
+			or 0
+		) + 1
+		if WasVisible and BlockedChecks < 2 then
+			Visible = true
+		end
+	end
+
+	EspVisibilityCache[PlayerIdentity] = {
+		Character = Target.Character,
+		Visible = Visible,
+		BlockedChecks = ClearLine and 0 or BlockedChecks,
+		ExpiresAt = Now + (Visible and 0.09 or 0.06),
+	}
+	return Visible
 end
 
 local function GetHeldWeaponName(Character)
@@ -1561,6 +1680,11 @@ local function UpdateEspBundle(Bundle, Target, Camera, Origin)
 
 	local X, Y, Width, Height = GetEspBox(Target)
 	if not X then
+		return false
+	end
+
+	if not IsEspTargetVisible(Target, Camera) then
+		HideEspBundle(Bundle)
 		return false
 	end
 
