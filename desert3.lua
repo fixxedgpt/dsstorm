@@ -98,7 +98,14 @@ local EspStatus = {
 local CrateEspStatus = {
 	Text = "off",
 }
-local CrateTrackChoices = { "All crates" }
+local CrateTrackChoices = {
+	"All crates",
+	"Wooden Crate",
+	"Ammo Crate Large",
+	"T1 Stash",
+	"T2 Stash",
+	"T3 Stash",
+}
 local RequestCrateEspScan
 local SilentAimStatus = {
 	Text = "inactive",
@@ -970,7 +977,7 @@ local CrateEspToggle = CrateEspSection:Toggle("enabled", false, function(Value)
 	Flags.CrateEspEnabled = Value
 	CrateEspStatus.Text = Value and "scanning..." or "off"
 	if Value and RequestCrateEspScan then
-		RequestCrateEspScan(true)
+		RequestCrateEspScan(false)
 	end
 end)
 
@@ -984,9 +991,7 @@ local UpdatingCrateTrackSelection = false
 CrateTrackDropdown = CrateEspSection:Dropdown(
 	"track crates",
 	Flags.CrateEspTrackedNames,
-	function()
-		return CrateTrackChoices
-	end,
+	CrateTrackChoices,
 	true,
 	function(Value)
 		if UpdatingCrateTrackSelection then
@@ -1012,7 +1017,7 @@ CrateTrackDropdown = CrateEspSection:Dropdown(
 		end
 		Flags.CrateEspTrackedNames = SelectedNames
 	end
-):Tooltip("Choose All crates or select exact discovered lootable crate types.")
+):Tooltip("Filters the one-time static loot-crate cache; changing this list never rescans the map.")
 
 local CrateBoxToggle = CrateEspSection:Toggle("bounding box", true, function(Value)
 	Flags.CrateEspBox = Value
@@ -1037,7 +1042,7 @@ CrateEspSection:Slider("max distance", Flags.CrateEspMaxDistance, 25, 100, 5000,
 end)
 
 CrateEspSection:Label(function()
-	return "status [loot-only]: " .. CrateEspStatus.Text
+	return "status [static loot]: " .. CrateEspStatus.Text
 end)
 
 local SettingsTab = Win:AddSettingsTab("cog")
@@ -1812,13 +1817,11 @@ end
 
 local CrateEspBundles = {}
 local CrateEspTargets = {}
-local CrateEspLastScan = -math.huge
 local CrateEspRendererFailed = false
 local CrateEspErrorReported = false
 local CrateEspScanRunning = false
-local CrateEspScanRequested = true
-local CrateEspNextScanAt = 0
-local CRATE_SCAN_INTERVAL = 30
+local CrateEspScanRequested = false
+local CrateEspScanComplete = false
 local CRATE_SCAN_YIELD_EVERY = 250
 local CRATE_TARGET_LIMIT = 96
 
@@ -1867,6 +1870,16 @@ local LootInteractionTokens = {
 	"openprompt",
 	"containerdata",
 	"storage",
+}
+
+local LootPromptTokens = {
+	"open",
+	"loot",
+	"search",
+	"container",
+	"crate",
+	"stash",
+	"cache",
 }
 
 local function IsInstanceA(Instance, ClassName)
@@ -1956,6 +1969,29 @@ local function IsLootInteractionMarker(Instance)
 	return HasLootAttributes(Instance)
 end
 
+local function GetLootPromptLabel(Instance)
+	if not IsInstanceA(Instance, "ProximityPrompt") then
+		return nil
+	end
+
+	local ActionText
+	local ObjectText
+	pcall(function()
+		ActionText = Instance.ActionText
+		ObjectText = Instance.ObjectText
+	end)
+	if
+		not ContainsAnyToken(ActionText, LootPromptTokens)
+		and not ContainsAnyToken(ObjectText, CrateNameTokens)
+	then
+		return nil
+	end
+	if type(ObjectText) == "string" and ObjectText ~= "" then
+		return ObjectText
+	end
+	return "Loot Container"
+end
+
 local function HasDirectLootSignal(Instance)
 	if not Instance then
 		return false
@@ -2042,6 +2078,18 @@ local function CleanCrateName(Name)
 	Name = Name:gsub("(%d)(%u)", "%1 %2")
 	Name = Name:gsub("(%a)(%d)", "%1 %2")
 	Name = Name:gsub("%s+", " "):gsub("%s+$", "")
+	local CompactName = CompactCrateText(Name)
+	if string.find(CompactName, "woodencrate", 1, true) then
+		return "Wooden Crate"
+	end
+	if string.find(CompactName, "ammocratelarge", 1, true) then
+		return "Ammo Crate Large"
+	end
+	for Tier = 1, 3 do
+		if string.find(CompactName, "t" .. tostring(Tier) .. "stash", 1, true) then
+			return "T" .. tostring(Tier) .. " Stash"
+		end
+	end
 	if string.lower(Name) == "crates" then
 		return "Crate"
 	end
@@ -2154,11 +2202,10 @@ end
 local function RefreshCrateTargets()
 	local FoundTargets = {}
 	local FoundCount = 0
-	local DiscoveredNames = {}
 	local SeenCandidateIdentities = {}
 	local CandidateChecks = 0
 
-	local function AddCandidate(Instance, LabelHint, TrustedTag)
+	local function AddCandidate(Instance, LabelHint, TrustedTag, PreferLabelHint)
 		if FoundCount >= CRATE_TARGET_LIMIT then
 			return
 		end
@@ -2185,23 +2232,26 @@ local function RefreshCrateTargets()
 		SeenCandidateIdentities[Identity] = true
 
 		local CandidateName = GetInstanceName(Candidate)
-		local DisplayName = CleanCrateName(IsCrateName(CandidateName) and CandidateName or LabelHint)
+		local DisplaySource = PreferLabelHint and LabelHint
+			or (IsCrateName(CandidateName) and CandidateName or LabelHint)
+		local DisplayName = CleanCrateName(DisplaySource)
 		local CandidatePosition = GetPartPosition(Part)
-		if CandidatePosition then
-			for _, ExistingTarget in FoundTargets do
-				local ExistingPosition = ExistingTarget.AnchorPosition
-				if
-					ExistingTarget.DisplayName == DisplayName
-					and ExistingPosition
-					and (ExistingPosition - CandidatePosition).Magnitude <= 6
-				then
-					local MemberCount = ExistingTarget.MemberCount or 1
-					ExistingTarget.AnchorPosition = (
-						ExistingPosition * MemberCount + CandidatePosition
-					) / (MemberCount + 1)
-					ExistingTarget.MemberCount = MemberCount + 1
-					return
-				end
+		if not CandidatePosition then
+			return
+		end
+		for _, ExistingTarget in FoundTargets do
+			local ExistingPosition = ExistingTarget.AnchorPosition
+			if
+				ExistingTarget.DisplayName == DisplayName
+				and ExistingPosition
+				and (ExistingPosition - CandidatePosition).Magnitude <= 6
+			then
+				local MemberCount = ExistingTarget.MemberCount or 1
+				ExistingTarget.AnchorPosition = (
+					ExistingPosition * MemberCount + CandidatePosition
+				) / (MemberCount + 1)
+				ExistingTarget.MemberCount = MemberCount + 1
+				return
 			end
 		end
 
@@ -2213,7 +2263,6 @@ local function RefreshCrateTargets()
 			AnchorPosition = CandidatePosition,
 			MemberCount = 1,
 		}
-		DiscoveredNames[DisplayName] = true
 		FoundCount = FoundCount + 1
 	end
 
@@ -2227,18 +2276,21 @@ local function RefreshCrateTargets()
 				break
 			end
 
+			local PromptLabel = GetLootPromptLabel(Descendant)
 			local Name = GetInstanceName(Descendant)
-			if IsCrateName(Name) then
+			if PromptLabel then
+				AddCandidate(GetInstanceParent(Descendant), PromptLabel, true, true)
+			elseif IsCrateName(Name) then
 				if IsInstanceA(Descendant, "Folder") then
 					local Children
 					pcall(function()
 						Children = Descendant:GetChildren()
 					end)
 					for _, Child in Children or {} do
-						AddCandidate(Child, Name, false)
+						AddCandidate(Child, Name, false, false)
 					end
 				else
-					AddCandidate(Descendant, Name, false)
+					AddCandidate(Descendant, Name, false, false)
 				end
 			end
 
@@ -2266,7 +2318,7 @@ local function RefreshCrateTargets()
 				for _, Instance in Tagged or {} do
 					local TrustedTag = IsExplicitLootName(Tag)
 						or ContainsAnyToken(Tag, LootInteractionTokens)
-					AddCandidate(Instance, Tag, TrustedTag)
+					AddCandidate(Instance, Tag, TrustedTag, false)
 				end
 			end
 		end
@@ -2276,31 +2328,14 @@ local function RefreshCrateTargets()
 		return
 	end
 	CrateEspTargets = FoundTargets
-	local UpdatedChoices = { "All crates" }
-	for Name in DiscoveredNames do
-		UpdatedChoices[#UpdatedChoices + 1] = Name
-	end
-	table.sort(UpdatedChoices, function(Left, Right)
-		if Left == "All crates" then
-			return true
-		end
-		if Right == "All crates" then
-			return false
-		end
-		return string.lower(Left) < string.lower(Right)
-	end)
-	CrateTrackChoices = UpdatedChoices
 end
 
-RequestCrateEspScan = function(Immediate)
+RequestCrateEspScan = function(Force)
 	if not Flags.Running then
 		return
 	end
-
-	if not CrateEspScanRequested then
-		CrateEspNextScanAt = Immediate and 0 or tick() + 0.6
-	elseif Immediate then
-		CrateEspNextScanAt = 0
+	if CrateEspScanComplete and not Force then
+		return
 	end
 	CrateEspScanRequested = true
 end
@@ -2312,7 +2347,6 @@ local function StartCrateEspScan()
 
 	CrateEspScanRunning = true
 	CrateEspScanRequested = false
-	CrateEspLastScan = tick()
 	CrateEspStatus.Text = "scanning loot..."
 	task.spawn(function()
 		local ScanSuccess, ScanError = pcall(RefreshCrateTargets)
@@ -2328,27 +2362,10 @@ local function StartCrateEspScan()
 			end
 		else
 			CrateEspErrorReported = false
+			CrateEspScanComplete = true
 		end
 	end)
 end
-
-local function IsRelevantCrateChange(Instance)
-	return IsCrateName(GetInstanceName(Instance))
-		or IsInstanceA(Instance, "ProximityPrompt")
-		or IsInstanceA(Instance, "ClickDetector")
-end
-
-TrackConnection(Workspace.DescendantAdded:Connect(function(Instance)
-	if Flags.CrateEspEnabled and IsRelevantCrateChange(Instance) then
-		RequestCrateEspScan(false)
-	end
-end))
-
-TrackConnection(Workspace.DescendantRemoving:Connect(function(Instance)
-	if Flags.CrateEspEnabled and IsRelevantCrateChange(Instance) then
-		RequestCrateEspScan(false)
-	end
-end))
 
 local function CreateCrateEspBundle()
 	local Bundle = {
@@ -2445,103 +2462,22 @@ local function ShouldTrackCrate(DisplayName)
 	return false
 end
 
-local function GetCrateScreenBox(Target, Distance)
-	local Part = Target.Part or FindCratePart(Target.Instance)
-	local AnchorPosition = Target.AnchorPosition or GetPartPosition(Part)
-	if not Part or not AnchorPosition then
-		return nil
-	end
-
-	local AnchorScreen, AnchorOnScreen = ProjectToScreen(AnchorPosition)
-	if not AnchorScreen or not AnchorOnScreen then
-		return nil
-	end
-
-	local FallbackHeight = Clamp(1100 / math.max(Distance, 1), 12, 70)
-	local FallbackWidth = FallbackHeight * 1.25
-	local function GetFallbackBox()
-		return AnchorScreen.X - FallbackWidth * 0.5,
-			AnchorScreen.Y - FallbackHeight * 0.5,
-			FallbackWidth,
-			FallbackHeight
-	end
-
-	local BoundsCFrame
-	local BoundsSize
-	if (Target.MemberCount or 1) <= 1 then
-		pcall(function()
-			BoundsCFrame = Part.CFrame
-			BoundsSize = Part.Size
-		end)
-	end
-
-	local BoundsAreSane = false
-	if BoundsCFrame and BoundsSize then
-		BoundsAreSane = BoundsSize.X >= 0.05
-			and BoundsSize.Y >= 0.05
-			and BoundsSize.Z >= 0.05
-			and BoundsSize.X <= 30
-			and BoundsSize.Y <= 30
-			and BoundsSize.Z <= 30
-	end
-
-	local MinimumX = math.huge
-	local MinimumY = math.huge
-	local MaximumX = -math.huge
-	local MaximumY = -math.huge
-	local ProjectedCount = 0
-	local AnyOnScreen = false
-
-	if BoundsAreSane then
-		for XSign = -1, 1, 2 do
-			for YSign = -1, 1, 2 do
-				for ZSign = -1, 1, 2 do
-					local WorldPosition
-					pcall(function()
-						WorldPosition = BoundsCFrame
-							* Vector3.new(
-								BoundsSize.X * 0.5 * XSign,
-								BoundsSize.Y * 0.5 * YSign,
-								BoundsSize.Z * 0.5 * ZSign
-							)
-					end)
-					if WorldPosition then
-						local ScreenPosition, OnScreen = ProjectToScreen(WorldPosition)
-						if ScreenPosition then
-							ProjectedCount = ProjectedCount + 1
-							AnyOnScreen = AnyOnScreen or OnScreen
-							MinimumX = math.min(MinimumX, ScreenPosition.X)
-							MinimumY = math.min(MinimumY, ScreenPosition.Y)
-							MaximumX = math.max(MaximumX, ScreenPosition.X)
-							MaximumY = math.max(MaximumY, ScreenPosition.Y)
-						end
-					end
-				end
-			end
+local function GetCrateScreenBox(Target, Distance, AnchorScreen)
+	if not AnchorScreen then
+		local AnchorPosition = Target.AnchorPosition
+		if not AnchorPosition then
+			return nil
+		end
+		local OnScreen
+		AnchorScreen, OnScreen = ProjectToScreen(AnchorPosition + Vector3.new(0, 1.25, 0))
+		if not AnchorScreen or not OnScreen then
+			return nil
 		end
 	end
 
-	if ProjectedCount >= 2 and AnyOnScreen then
-		local Width = MaximumX - MinimumX
-		local Height = MaximumY - MinimumY
-		local CenterX = MinimumX + Width * 0.5
-		local CenterY = MinimumY + Height * 0.5
-		local CenterOffset = Vector2.new(CenterX - AnchorScreen.X, CenterY - AnchorScreen.Y).Magnitude
-		local MaximumWidth = math.max(FallbackWidth * 3.5, 80)
-		local MaximumHeight = math.max(FallbackHeight * 3.5, 80)
-		local MaximumOffset = math.max(FallbackWidth, FallbackHeight) * 1.75 + 16
-		if
-			Width >= 3
-			and Height >= 3
-			and Width <= MaximumWidth
-			and Height <= MaximumHeight
-			and CenterOffset <= MaximumOffset
-		then
-			return MinimumX, MinimumY, Width, Height
-		end
-	end
-
-	return GetFallbackBox()
+	local Height = Clamp(1100 / math.max(Distance, 1), 12, 70)
+	local Width = Height * 1.25
+	return AnchorScreen.X - Width * 0.5, AnchorScreen.Y - Height * 0.5, Width, Height
 end
 
 local function BuildFullBoxSegments(X, Y, Width, Height)
@@ -2595,11 +2531,7 @@ local function UpdateCrateEspFrame()
 		return
 	end
 
-	local Now = tick()
-	if not CrateEspScanRunning and not CrateEspScanRequested and Now - CrateEspLastScan >= CRATE_SCAN_INTERVAL then
-		RequestCrateEspScan(true)
-	end
-	if CrateEspScanRequested and not CrateEspScanRunning and Now >= CrateEspNextScanAt then
+	if CrateEspScanRequested and not CrateEspScanRunning then
 		StartCrateEspScan()
 	end
 
@@ -2628,21 +2560,7 @@ local function UpdateCrateEspFrame()
 	for Identity, Target in CrateEspTargets do
 		FoundCount = FoundCount + 1
 		if ShouldTrackCrate(Target.DisplayName) then
-			local Part = Target.Part
 			local Position = Target.AnchorPosition
-			if (Target.MemberCount or 1) <= 1 then
-				local CurrentPosition = GetPartPosition(Part)
-				if CurrentPosition then
-					Position = CurrentPosition
-					Target.AnchorPosition = CurrentPosition
-				end
-			end
-			if not Position then
-				Part = FindCratePart(Target.Instance)
-				Target.Part = Part
-				Position = GetPartPosition(Part)
-				Target.AnchorPosition = Position
-			end
 			if Position then
 				local Distance = (Origin - Position).Magnitude
 				if Distance <= Flags.CrateEspMaxDistance then
@@ -2655,7 +2573,8 @@ local function UpdateCrateEspFrame()
 							local BoxWidth
 							local BoxHeight
 							if Flags.CrateEspBox then
-								BoxX, BoxY, BoxWidth, BoxHeight = GetCrateScreenBox(Target, Distance)
+								BoxX, BoxY, BoxWidth, BoxHeight =
+									GetCrateScreenBox(Target, Distance, ScreenPosition)
 							end
 
 							if BoxX then
