@@ -129,6 +129,7 @@ for _, Name in CrateOtherChoices do
 end
 local RequestCrateEspScan
 local CopyCrateScannerReport
+local CaptureAimedCrate
 local SilentAimStatus = {
 	Text = "inactive",
 }
@@ -1089,6 +1090,12 @@ end):Tooltip("Records the raw Workspace model and path when you manually open a 
 CrateEspSection:Label(function()
 	return "scanner: " .. CrateScannerStatus.Text
 end)
+
+CrateEspSection:Button("scan aimed case", function()
+	if CaptureAimedCrate then
+		CaptureAimedCrate()
+	end
+end):Tooltip("Aim the camera at a container, then click to capture its raw Workspace identity.")
 
 CrateEspSection:Button("copy workspace id", function()
 	if CopyCrateScannerReport then
@@ -2846,6 +2853,63 @@ local function CaptureCrateScannerPrompt(Prompt, DirectTarget)
 	warn("case scanner captured:\n" .. CrateScannerStatus.Report)
 end
 
+CaptureAimedCrate = function()
+	if not Flags.Running or not Flags.CrateScannerEnabled then
+		CrateScannerStatus.Text = "enable scanner first"
+		return
+	end
+
+	local Camera = Workspace.CurrentCamera
+	if not Camera then
+		CrateScannerStatus.Text = "camera unavailable"
+		return
+	end
+
+	local Target
+	pcall(function()
+		local RaycastParameters = RaycastParams.new()
+		local Exclusions = { LocalPlayer.Character, Camera }
+		RaycastParameters.FilterDescendantsInstances = Exclusions
+		local FilterSet = pcall(function()
+			RaycastParameters.FilterType = Enum.RaycastFilterType.Exclude
+		end)
+		if not FilterSet then
+			RaycastParameters.FilterType = Enum.RaycastFilterType.Blacklist
+		end
+		RaycastParameters.IgnoreWater = true
+		local Result = Workspace:Raycast(
+			Camera.CFrame.Position,
+			Camera.CFrame.LookVector * 35,
+			RaycastParameters
+		)
+		Target = Result and Result.Instance
+	end)
+
+	if not Target then
+		pcall(function()
+			local Ray = Ray.new(Camera.CFrame.Position, Camera.CFrame.LookVector * 35)
+			Target = Workspace:FindPartOnRayWithIgnoreList(
+				Ray,
+				{ LocalPlayer.Character, Camera },
+				false,
+				true
+			)
+		end)
+	end
+
+	if not Target then
+		pcall(function()
+			Target = LocalPlayer:GetMouse().Target
+		end)
+	end
+
+	if not Target then
+		CrateScannerStatus.Text = "aim directly at case"
+		return
+	end
+	CaptureCrateScannerPrompt(nil, Target)
+end
+
 CopyCrateScannerReport = function()
 	if CrateScannerStatus.Report == "" then
 		CrateScannerStatus.Text = "open a case first"
@@ -2865,26 +2929,24 @@ pcall(function()
 	TrackConnection(ProximityPromptService.PromptTriggered:Connect(CaptureCrateScannerPrompt))
 end)
 
--- F-key fallback for custom interaction systems that do not use
--- ProximityPromptService. It captures the model under the mouse cursor.
+-- Polling fallback for Matcha environments where processed F input is not
+-- delivered through InputBegan.
 pcall(function()
 	local UserInputService = game:GetService("UserInputService")
-	TrackConnection(UserInputService.InputBegan:Connect(function(Input)
-		if
-			not Flags.Running
-			or not Flags.CrateScannerEnabled
-			or Input.KeyCode ~= Enum.KeyCode.F
-		then
+	local FWasDown = false
+	TrackConnection(RunService.Heartbeat:Connect(function()
+		if not Flags.Running or not Flags.CrateScannerEnabled then
+			FWasDown = false
 			return
 		end
-		local Mouse = LocalPlayer:GetMouse()
-		local Target
+		local FIsDown = false
 		pcall(function()
-			Target = Mouse.Target
+			FIsDown = UserInputService:IsKeyDown(Enum.KeyCode.F)
 		end)
-		if Target then
-			CaptureCrateScannerPrompt(nil, Target)
+		if FIsDown and not FWasDown then
+			CaptureAimedCrate()
 		end
+		FWasDown = FIsDown
 	end))
 end)
 
