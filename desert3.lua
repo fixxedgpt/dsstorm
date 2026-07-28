@@ -1306,6 +1306,177 @@ local function IsEspTeammate(Player)
 	return Success and Result
 end
 
+local function IsInsideCharacter(Instance, Character)
+	if not Instance or not Character then
+		return false
+	end
+	if Instance == Character then
+		return true
+	end
+
+	local Success, Result = pcall(function()
+		return Instance:IsDescendantOf(Character)
+	end)
+	if Success then
+		return Result
+	end
+
+	local Current = Instance
+	for _ = 1, 12 do
+		local Parent
+		pcall(function()
+			Parent = Current.Parent
+		end)
+		if not Parent then
+			break
+		end
+		if Parent == Character then
+			return true
+		end
+		Current = Parent
+	end
+	return false
+end
+
+local function BuildVisibilityIgnoreList(Target, Camera)
+	local IgnoreList = {}
+	local LocalCharacter
+	pcall(function()
+		LocalCharacter = LocalPlayer.Character
+	end)
+	if LocalCharacter then
+		IgnoreList[#IgnoreList + 1] = LocalCharacter
+	end
+	if Target.Character then
+		IgnoreList[#IgnoreList + 1] = Target.Character
+	end
+	if Camera then
+		IgnoreList[#IgnoreList + 1] = Camera
+	end
+	return IgnoreList
+end
+
+local function IsMeaningfulBlocker(Instance, TargetCharacter)
+	if not Instance or IsInsideCharacter(Instance, TargetCharacter) then
+		return false
+	end
+
+	local Transparency
+	pcall(function()
+		Transparency = Instance.Transparency
+	end)
+	return type(Transparency) ~= "number" or Transparency < 0.98
+end
+
+local function QueryCameraOcclusion(Camera, SamplePosition, IgnoreList, TargetCharacter)
+	local Success, Blockers = pcall(function()
+		return Camera:GetPartsObscuringTarget({ SamplePosition }, IgnoreList)
+	end)
+	if not Success or type(Blockers) ~= "table" then
+		return nil
+	end
+
+	for _, Blocker in Blockers do
+		if IsMeaningfulBlocker(Blocker, TargetCharacter) then
+			return false
+		end
+	end
+	return true
+end
+
+local function QueryLegacyRay(CameraPosition, Direction, IgnoreList, TargetCharacter)
+	local LegacyRay
+	local RaySuccess = pcall(function()
+		LegacyRay = Ray.new(CameraPosition, Direction)
+	end)
+	if not RaySuccess or not LegacyRay then
+		return nil
+	end
+
+	local Success, Hit = pcall(function()
+		return Workspace:FindPartOnRayWithIgnoreList(LegacyRay, IgnoreList, false, true)
+	end)
+	if not Success then
+		local LocalCharacter
+		pcall(function()
+			LocalCharacter = LocalPlayer.Character
+		end)
+		Success, Hit = pcall(function()
+			return Workspace:FindPartOnRay(LegacyRay, LocalCharacter, false, true)
+		end)
+		if not Success then
+			return nil
+		end
+	end
+	return not IsMeaningfulBlocker(Hit, TargetCharacter)
+end
+
+local function QueryModernRay(CameraPosition, Direction, IgnoreList, TargetCharacter)
+	local Params
+	local ParamsSuccess = pcall(function()
+		Params = RaycastParams.new()
+		local FilterType = Enum.RaycastFilterType.Exclude
+		if FilterType == nil then
+			FilterType = Enum.RaycastFilterType.Blacklist
+		end
+		Params.FilterType = FilterType
+		Params.FilterDescendantsInstances = IgnoreList
+		Params.IgnoreWater = true
+	end)
+	if not ParamsSuccess or not Params then
+		return nil
+	end
+
+	local Success, Result = pcall(function()
+		return Workspace:Raycast(CameraPosition, Direction, Params)
+	end)
+	if not Success then
+		return nil
+	end
+	if not Result then
+		return true
+	end
+
+	local Hit
+	pcall(function()
+		Hit = Result.Instance
+	end)
+	return not IsMeaningfulBlocker(Hit, TargetCharacter)
+end
+
+local function QueryVisibilityPoint(Camera, CameraPosition, SamplePosition, IgnoreList, TargetCharacter)
+	local Direction = SamplePosition - CameraPosition
+	if Direction.Magnitude <= 0.05 then
+		return true, true
+	end
+
+	local ReliableClearCheck = false
+	local CameraVisible = QueryCameraOcclusion(Camera, SamplePosition, IgnoreList, TargetCharacter)
+	if CameraVisible ~= nil then
+		if not CameraVisible then
+			return false, true
+		end
+		ReliableClearCheck = true
+	end
+
+	local LegacyVisible = QueryLegacyRay(CameraPosition, Direction, IgnoreList, TargetCharacter)
+	if LegacyVisible ~= nil then
+		if not LegacyVisible then
+			return false, true
+		end
+		ReliableClearCheck = true
+	end
+
+	local ModernVisible = QueryModernRay(CameraPosition, Direction, IgnoreList, TargetCharacter)
+	if ModernVisible ~= nil then
+		if not ModernVisible then
+			return false, true
+		end
+	end
+
+	return ReliableClearCheck, ReliableClearCheck
+end
+
 local function IsEspTargetVisible(Target, Camera)
 	if not Flags.EspVisibleOnly then
 		return true
@@ -1328,35 +1499,10 @@ local function IsEspTargetVisible(Target, Camera)
 		CameraPosition = Camera.Position
 	end)
 	if not CameraPosition then
-		return WasVisible
+		return false
 	end
 
-	local IgnoreList = {}
-	local LocalCharacter
-	pcall(function()
-		LocalCharacter = LocalPlayer.Character
-	end)
-	if LocalCharacter then
-		IgnoreList[#IgnoreList + 1] = LocalCharacter
-	end
-	if Target.Character then
-		IgnoreList[#IgnoreList + 1] = Target.Character
-	end
-	if Camera then
-		IgnoreList[#IgnoreList + 1] = Camera
-	end
-
-	local Params
-	local ParamsSuccess = pcall(function()
-		Params = RaycastParams.new()
-		Params.FilterType = Enum.RaycastFilterType.Exclude
-		Params.FilterDescendantsInstances = IgnoreList
-		Params.IgnoreWater = true
-	end)
-	if not ParamsSuccess or not Params then
-		return WasVisible
-	end
-
+	local IgnoreList = BuildVisibilityIgnoreList(Target, Camera)
 	local HeadPosition = GetPartPosition(Target.Head)
 	local RootPosition = GetPartPosition(Target.RootPart)
 	local SamplePositions = {}
@@ -1371,29 +1517,26 @@ local function IsEspTargetVisible(Target, Camera)
 	end
 
 	local Visible = false
-	local RaycastWorked = false
+	local VisibilityQueryWorked = false
 	for _, SamplePosition in SamplePositions do
-		local Direction = SamplePosition - CameraPosition
-		if Direction.Magnitude <= 0.05 then
-			Visible = true
-			RaycastWorked = true
-			break
-		end
-
-		local Success, Result = pcall(function()
-			return Workspace:Raycast(CameraPosition, Direction, Params)
-		end)
-		if Success then
-			RaycastWorked = true
-			if not Result then
+		local PointVisible, QueryWorked = QueryVisibilityPoint(
+			Camera,
+			CameraPosition,
+			SamplePosition,
+			IgnoreList,
+			Target.Character
+		)
+		if QueryWorked then
+			VisibilityQueryWorked = true
+			if PointVisible then
 				Visible = true
 				break
 			end
 		end
 	end
 
-	if not RaycastWorked then
-		return WasVisible
+	if not VisibilityQueryWorked then
+		return false
 	end
 
 	local ClearLine = Visible
