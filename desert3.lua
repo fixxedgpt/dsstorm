@@ -1986,14 +1986,6 @@ local function ResolveConfirmedCrate(Instance)
 	if FallbackPart then
 		return FallbackPart, FallbackPart
 	end
-
-	local Part
-	pcall(function()
-		Part = Instance:FindFirstChildWhichIsA("BasePart", true)
-	end)
-	if ConfirmedCrateIsA(Part, "BasePart") then
-		return Instance, Part
-	end
 	return nil, nil
 end
 
@@ -2014,8 +2006,8 @@ local function GetConfirmedCrateBounds(Owner, Part)
 	return BoxCFrame, BoxSize
 end
 
-local function CacheConfirmedCrate(Instance, TargetMap)
-	local Alias = GetConfirmedCrateAlias(Instance)
+local function CacheConfirmedCrate(Instance, TargetMap, InheritedAlias)
+	local Alias = GetConfirmedCrateAlias(Instance) or InheritedAlias
 	if not Alias then
 		return false
 	end
@@ -2036,23 +2028,36 @@ end
 
 local function ScanConfirmedCrates()
 	local TargetMap = {}
-	local Queue = { Workspace }
+	local QueueInstances = { Workspace }
+	local QueueAliases = {}
 	local QueueIndex = 1
 	local Checked = 0
 
-	while QueueIndex <= #Queue do
+	while QueueIndex <= #QueueInstances do
 		if not Flags.Running or not Flags.CrateEspEnabled then
 			return nil
 		end
-		local Parent = Queue[QueueIndex]
+		local Parent = QueueInstances[QueueIndex]
+		local ParentAlias = QueueAliases[QueueIndex]
 		QueueIndex = QueueIndex + 1
 		local Children = {}
 		pcall(function()
 			Children = Parent:GetChildren()
 		end)
 		for _, Child in ipairs(Children) do
-			Queue[#Queue + 1] = Child
-			CacheConfirmedCrate(Child, TargetMap)
+			local Alias = GetConfirmedCrateAlias(Child) or ParentAlias
+			QueueInstances[#QueueInstances + 1] = Child
+			QueueAliases[#QueueInstances] = Alias
+			if
+				Alias
+				and (
+					ConfirmedCrateIsA(Child, "BasePart")
+					or ConfirmedCrateIsA(Child, "Model")
+					or ConfirmedCrateIsA(Child, "SpecialMesh")
+				)
+			then
+				CacheConfirmedCrate(Child, TargetMap, Alias)
+			end
 			Checked = Checked + 1
 			if Checked % CONFIRMED_CRATE_SCAN_YIELD_EVERY == 0 then
 				task.wait()
@@ -2108,8 +2113,27 @@ pcall(function()
 		if not Flags.Running then
 			return
 		end
+		local Alias = GetConfirmedCrateAlias(Instance)
+		local Cursor = GetConfirmedCrateParent(Instance)
+		for _ = 1, 10 do
+			if Alias or not Cursor or Cursor == Workspace then
+				break
+			end
+			Alias = GetConfirmedCrateAlias(Cursor)
+			Cursor = GetConfirmedCrateParent(Cursor)
+		end
+		if not Alias then
+			return
+		end
+		if
+			not ConfirmedCrateIsA(Instance, "BasePart")
+			and not ConfirmedCrateIsA(Instance, "Model")
+			and not ConfirmedCrateIsA(Instance, "SpecialMesh")
+		then
+			return
+		end
 		local TargetMap = {}
-		if CacheConfirmedCrate(Instance, TargetMap) then
+		if CacheConfirmedCrate(Instance, TargetMap, Alias) then
 			for Key, Target in pairs(TargetMap) do
 				ConfirmedCrateTargets[Key] = Target
 			end
