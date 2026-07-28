@@ -1042,25 +1042,28 @@ end)
 
 CrateEspSection:Toggle("case scanner", false, function(Value)
 	Flags.CrateScannerEnabled = Value
-	CrateScannerStatus.Text = Value and "manual 35u scan ready" or "off"
-end):Tooltip("Enables a manual, capped spatial scan for nearby crate/container Workspace IDs.")
+	CrateScannerStatus.Text = Value and "starting live 35u scan..." or "off"
+	if Value and CaptureAimedCrate then
+		task.defer(CaptureAimedCrate)
+	end
+end):Tooltip("Live raw-name discovery for nearby crate/container matches, limited to 35 studs.")
 
 CrateEspSection:Label(function()
 	return "scanner: " .. CrateScannerStatus.Text
 end)
 
-CrateEspSection:Button("scan crate IDs [35u]", function()
+CrateEspSection:Button("refresh live scan [35u]", function()
 	if CaptureAimedCrate then
 		CrateScannerStatus.Text = "scanning 35u..."
 		task.defer(CaptureAimedCrate)
 	end
-end):Tooltip("Runs one 35-stud spatial query now. It does not continue scanning afterward.")
+end):Tooltip("Forces an immediate refresh of the live 35-stud discovery overlay.")
 
 CrateEspSection:Button("copy workspace id", function()
 	if CopyCrateScannerReport then
 		CopyCrateScannerReport()
 	end
-end):Tooltip("Copies the raw names, exposed IDs, paths and attributes from the last 35u scan.")
+end):Tooltip("Copies the raw names, exposed IDs, paths and attributes from the live 35u matches.")
 
 local SettingsTab = Win:AddSettingsTab("cog")
 local ScriptSettingsSection = SettingsTab:Section("script", "Right")
@@ -1833,7 +1836,9 @@ local function UpdateEspFrame()
 end
 
 local CRATE_SCANNER_RADIUS = 35
-local CRATE_SCANNER_PART_LIMIT = 256
+local CRATE_SCANNER_PART_LIMIT = 192
+local CRATE_SCANNER_TARGET_LIMIT = 64
+local CRATE_SCANNER_REFRESH_INTERVAL = 0.65
 local CrateScannerTokens = {
 	"crate",
 	"container",
@@ -1850,6 +1855,12 @@ local CrateScannerTokens = {
 	"laptop",
 	"box",
 }
+
+local CrateScannerTargets = {}
+local CrateScannerBundles = {}
+local CrateScannerMetadataCache = {}
+local CrateScannerScanRunning = false
+local CrateScannerErrorReported = false
 
 local function GetScannerName(Instance)
 	local Name
@@ -1900,7 +1911,7 @@ local function GetScannerAttributes(Instance)
 		local ValueType = type(Value)
 		if ValueType == "string" or ValueType == "number" or ValueType == "boolean" then
 			Parts[#Parts + 1] = tostring(Key) .. "=" .. tostring(Value)
-			if #Parts >= 12 then
+			if #Parts >= 10 then
 				break
 			end
 		end
@@ -1909,10 +1920,12 @@ local function GetScannerAttributes(Instance)
 	return table.concat(Parts, ", ")
 end
 
-local function MatchScannerToken(Value)
-	local LowerValue = string.lower(tostring(Value or ""))
+local function MatchScannerToken(Instance)
+	local SearchText = string.lower(
+		GetScannerName(Instance) .. " " .. GetScannerClass(Instance)
+	)
 	for _, Token in ipairs(CrateScannerTokens) do
-		if string.find(LowerValue, Token, 1, true) then
+		if string.find(SearchText, Token, 1, true) then
 			return Token
 		end
 	end
@@ -1935,6 +1948,30 @@ local function HasScannerHumanoidAncestor(Instance)
 		Cursor = GetScannerParent(Cursor)
 	end
 	return false
+end
+
+local function FindScannerPart(Instance, FallbackPart)
+	if ScannerIsA(Instance, "BasePart") then
+		return Instance
+	end
+	if not ScannerIsA(Instance, "Model") then
+		return ScannerIsA(FallbackPart, "BasePart") and FallbackPart or nil
+	end
+	local PrimaryPart
+	pcall(function()
+		PrimaryPart = Instance and Instance.PrimaryPart
+	end)
+	if ScannerIsA(PrimaryPart, "BasePart") then
+		return PrimaryPart
+	end
+	local Part
+	pcall(function()
+		Part = Instance and Instance:FindFirstChildWhichIsA("BasePart", true)
+	end)
+	if ScannerIsA(Part, "BasePart") then
+		return Part
+	end
+	return ScannerIsA(FallbackPart, "BasePart") and FallbackPart or nil
 end
 
 local function QueryNearbyScannerParts(Origin)
@@ -1973,17 +2010,38 @@ local function QueryNearbyScannerParts(Origin)
 	return type(Parts) == "table" and Parts or {}
 end
 
-local CrateScannerScanRunning = false
-local function CaptureNearbyWorkspaceIds()
-	if not Flags.CrateScannerEnabled then
-		CrateScannerStatus.Text = "enable scanner first"
-		return
+local function BuildScannerReport(Targets, NearbyPartCount)
+	local Lines = {
+		"live crate discovery radius: 35u",
+		"nearby parts checked: " .. tostring(NearbyPartCount),
+		"matching workspace IDs: " .. tostring(#Targets),
+	}
+	for Index, Target in ipairs(Targets) do
+		local Line = tostring(Index)
+			.. ". raw="
+			.. Target.DisplayName
+			.. " | class="
+			.. GetScannerClass(Target.Instance)
+			.. " | id="
+			.. Target.Identity
+			.. " | match="
+			.. Target.Reason
+			.. " | distance="
+			.. tostring(math.floor(Target.Distance + 0.5))
+			.. "u | path="
+			.. GetScannerPath(Target.Instance)
+		if Target.Attributes ~= "" then
+			Line = Line .. " | attributes={" .. Target.Attributes .. "}"
+		end
+		Lines[#Lines + 1] = Line
 	end
-	if CrateScannerScanRunning then
-		CrateScannerStatus.Text = "scan already running"
-		return
-	end
+	return table.concat(Lines, "\n")
+end
 
+local function RefreshLiveCrateScanner()
+	if not Flags.Running or not Flags.CrateScannerEnabled or CrateScannerScanRunning then
+		return
+	end
 	local RootPart = GetLocalRoot()
 	local Origin = GetPartPosition(RootPart)
 	if not Origin then
@@ -1992,133 +2050,172 @@ local function CaptureNearbyWorkspaceIds()
 	end
 
 	CrateScannerScanRunning = true
-	CrateScannerStatus.Text = "scanning 35u..."
-	local NearbyParts = QueryNearbyScannerParts(Origin)
-	local Candidates = {}
-	local AttributeCache = {}
+	local Success, ErrorMessage = pcall(function()
+		local NearbyParts = QueryNearbyScannerParts(Origin)
+		local Candidates = {}
+		local AttributeCache = {}
+		local NewMetadataCache = {}
+		local LocalMarkerCache = {}
 
-	local function GetCachedAttributes(Instance)
-		local Cached = AttributeCache[Instance]
-		if Cached == nil then
-			Cached = GetScannerAttributes(Instance)
-			AttributeCache[Instance] = Cached
+		local function GetCachedAttributes(Instance)
+			local Cached = AttributeCache[Instance]
+			if Cached == nil then
+				Cached = GetScannerAttributes(Instance)
+				AttributeCache[Instance] = Cached
+			end
+			return Cached
 		end
-		return Cached
-	end
 
-	local function AddCandidate(Instance, Distance, Reason)
-		if not Instance or Instance == Workspace then
-			return
-		end
-		local Identity = GetInstanceIdentity(Instance)
-		local Existing = Candidates[Identity]
-		if not Existing or Distance < Existing.Distance then
-			Candidates[Identity] = {
-				Instance = Instance,
-				Identity = Identity,
-				Distance = Distance,
-				Reason = Reason,
-				Attributes = GetCachedAttributes(Instance),
-			}
-		end
-	end
-
-	for PartIndex, Part in ipairs(NearbyParts) do
-		if ScannerIsA(Part, "BasePart") and not HasScannerHumanoidAncestor(Part) then
-			local Position = GetPartPosition(Part)
-			local Distance = Position and (Position - Origin).Magnitude or CRATE_SCANNER_RADIUS
-			local Chain = {}
-			local Cursor = Part
-			local MatchedAncestorIndex
-
-			for _ = 1, 7 do
-				if not Cursor or Cursor == Workspace then
-					break
-				end
-				Chain[#Chain + 1] = Cursor
-				local Attributes = GetCachedAttributes(Cursor)
-				local Token = MatchScannerToken(
-					GetScannerName(Cursor)
-						.. " "
-						.. GetScannerClass(Cursor)
-						.. " "
-						.. Attributes
-				)
-				if Token then
-					AddCandidate(Cursor, Distance, Token)
-					MatchedAncestorIndex = MatchedAncestorIndex or #Chain
-				end
-				Cursor = GetScannerParent(Cursor)
+		local function FindLocalMarker(Root)
+			local Cached = LocalMarkerCache[Root]
+			if Cached ~= nil then
+				return Cached.Instance, Cached.Token
 			end
 
-			if MatchedAncestorIndex then
-				for Index = 1, MatchedAncestorIndex - 1 do
-					local Candidate = Chain[Index]
-					if ScannerIsA(Candidate, "Model") then
-						AddCandidate(Candidate, Distance, "owner")
-						break
+			local Result = {
+				Instance = false,
+				Token = nil,
+			}
+			local Queue = {
+				{ Instance = Root, Depth = 0 },
+			}
+			local QueueIndex = 1
+			while QueueIndex <= #Queue and QueueIndex <= 48 do
+				local Item = Queue[QueueIndex]
+				QueueIndex = QueueIndex + 1
+				local Children = {}
+				pcall(function()
+					Children = Item.Instance:GetChildren()
+				end)
+				for _, Child in ipairs(Children) do
+					local Token = MatchScannerToken(Child)
+					if Token then
+						Result.Instance = Child
+						Result.Token = Token
+						LocalMarkerCache[Root] = Result
+						return Child, Token
+					end
+					if Item.Depth < 2 and #Queue < 48 then
+						Queue[#Queue + 1] = {
+							Instance = Child,
+							Depth = Item.Depth + 1,
+						}
 					end
 				end
 			end
+			LocalMarkerCache[Root] = Result
+			return nil, nil
 		end
-		if PartIndex % 48 == 0 then
-			task.wait()
-		end
-	end
 
-	local Ordered = {}
-	for _, Candidate in pairs(Candidates) do
-		Ordered[#Ordered + 1] = Candidate
-	end
-	table.sort(Ordered, function(A, B)
-		if A.Distance == B.Distance then
-			return GetScannerName(A.Instance) < GetScannerName(B.Instance)
+		local function AddCandidate(Instance, SourcePart, Distance, Reason)
+			if not Instance or Instance == Workspace then
+				return
+			end
+			local Part = FindScannerPart(Instance, SourcePart)
+			if not Part then
+				return
+			end
+			local Identity = GetInstanceIdentity(Instance)
+			local Existing = Candidates[Identity]
+			if Existing and Existing.Distance <= Distance then
+				return
+			end
+			local Metadata = CrateScannerMetadataCache[Identity]
+			if not Metadata or Metadata.Instance ~= Instance then
+				Metadata = {
+					Instance = Instance,
+					Attributes = GetCachedAttributes(Instance),
+				}
+			end
+			NewMetadataCache[Identity] = Metadata
+			Candidates[Identity] = {
+				Instance = Instance,
+				Part = Part,
+				Identity = Identity,
+				DisplayName = GetScannerName(Instance),
+				Distance = Distance,
+				Reason = Reason,
+				Attributes = Metadata.Attributes,
+			}
 		end
-		return A.Distance < B.Distance
+
+		for PartIndex, Part in ipairs(NearbyParts) do
+			if ScannerIsA(Part, "BasePart") and not HasScannerHumanoidAncestor(Part) then
+				local Position = GetPartPosition(Part)
+				local Distance = Position and (Position - Origin).Magnitude or CRATE_SCANNER_RADIUS
+				local Cursor = Part
+				local ClosestModel
+				local FoundMatch = false
+
+				for _ = 1, 7 do
+					if not Cursor or Cursor == Workspace then
+						break
+					end
+					if not ClosestModel and ScannerIsA(Cursor, "Model") then
+						ClosestModel = Cursor
+					end
+					local Token = MatchScannerToken(Cursor)
+					if Token then
+						FoundMatch = true
+						AddCandidate(Cursor, Part, Distance, Token)
+					end
+					Cursor = GetScannerParent(Cursor)
+				end
+
+				if not FoundMatch and ClosestModel then
+					local Marker, Token = FindLocalMarker(ClosestModel)
+					if Marker then
+						FoundMatch = true
+						AddCandidate(Marker, Part, Distance, Token)
+					end
+				end
+
+				if FoundMatch then
+					AddCandidate(ClosestModel or Part, Part, Distance, "owner")
+				end
+			end
+			if PartIndex % 48 == 0 then
+				task.wait()
+			end
+		end
+
+		local Ordered = {}
+		for _, Candidate in pairs(Candidates) do
+			Ordered[#Ordered + 1] = Candidate
+		end
+		table.sort(Ordered, function(A, B)
+			if A.Distance == B.Distance then
+				return A.DisplayName < B.DisplayName
+			end
+			return A.Distance < B.Distance
+		end)
+		while #Ordered > CRATE_SCANNER_TARGET_LIMIT do
+			table.remove(Ordered)
+		end
+
+		CrateScannerMetadataCache = NewMetadataCache
+		CrateScannerTargets = Ordered
+		CrateScannerStatus.Report = BuildScannerReport(Ordered, #NearbyParts)
+		CrateScannerStatus.Text = "live "
+			.. tostring(#Ordered)
+			.. " matches [35u]"
 	end)
-
-	local Lines = {
-		"manual crate/container scan radius: 35u",
-		"nearby parts checked: " .. tostring(#NearbyParts),
-		"matching workspace IDs: " .. tostring(#Ordered),
-	}
-	for Index, Candidate in ipairs(Ordered) do
-		if Index > 96 then
-			break
-		end
-		local Instance = Candidate.Instance
-		local Line = tostring(Index)
-			.. ". raw="
-			.. GetScannerName(Instance)
-			.. " | class="
-			.. GetScannerClass(Instance)
-			.. " | id="
-			.. Candidate.Identity
-			.. " | match="
-			.. Candidate.Reason
-			.. " | distance="
-			.. tostring(math.floor(Candidate.Distance + 0.5))
-			.. "u | path="
-			.. GetScannerPath(Instance)
-		if Candidate.Attributes ~= "" then
-			Line = Line .. " | attributes={" .. Candidate.Attributes .. "}"
-		end
-		Lines[#Lines + 1] = Line
-	end
-
-	CrateScannerStatus.Report = table.concat(Lines, "\n")
-	CrateScannerStatus.Text = #Ordered > 0
-			and ("captured " .. tostring(#Ordered) .. " IDs [35u]")
-			or "no crate/container IDs [35u]"
 	CrateScannerScanRunning = false
-	warn("manual 35u crate scan:\n" .. CrateScannerStatus.Report)
+
+	if not Success then
+		CrateScannerStatus.Text = "live scan unavailable"
+		if not CrateScannerErrorReported then
+			CrateScannerErrorReported = true
+			warn("live 35u crate scanner failed: " .. tostring(ErrorMessage))
+		end
+	end
 end
 
-CaptureAimedCrate = CaptureNearbyWorkspaceIds
+CaptureAimedCrate = RefreshLiveCrateScanner
 
 CopyCrateScannerReport = function()
 	if CrateScannerStatus.Report == "" then
-		CrateScannerStatus.Text = "run 35u scan first"
+		CrateScannerStatus.Text = "waiting for live matches"
 		return
 	end
 	local Clipboard = Environment.setclipboard or Environment.toclipboard
@@ -2130,21 +2227,154 @@ CopyCrateScannerReport = function()
 	CrateScannerStatus.Text = Success and "workspace IDs copied" or "copy failed"
 end
 
-local ScannerInputConnection
-pcall(function()
-	ScannerInputConnection = UserInputService.InputBegan:Connect(function(Input)
-		if
-			Flags.Running
-			and Flags.CrateScannerEnabled
-			and Input.KeyCode == Enum.KeyCode.F
-		then
-			task.defer(CaptureNearbyWorkspaceIds)
+local function CreateCrateScannerBundle()
+	local Bundle = {
+		Label = CreateDrawingObject("Text"),
+		Lines = {},
+		Outlines = {},
+	}
+	if not Bundle.Label then
+		return nil
+	end
+	SetTextDefaults(Bundle.Label, true)
+	SetDrawingProperty(Bundle.Label, "ZIndex", 18)
+
+	for Index = 1, 8 do
+		local Outline = CreateDrawingObject("Line")
+		local Line = CreateDrawingObject("Line")
+		if not Outline or not Line then
+			return nil
 		end
-	end)
-end)
-if ScannerInputConnection then
-	TrackConnection(ScannerInputConnection)
+		SetDrawingProperty(Outline, "Color", Color3.fromRGB(0, 0, 0))
+		SetDrawingProperty(Outline, "Thickness", 3)
+		SetDrawingProperty(Outline, "Transparency", 0.85)
+		SetDrawingProperty(Outline, "ZIndex", 16)
+		SetDrawingProperty(Outline, "Visible", false)
+		SetDrawingProperty(Line, "Thickness", 1)
+		SetDrawingProperty(Line, "ZIndex", 17)
+		SetDrawingProperty(Line, "Visible", false)
+		Bundle.Outlines[Index] = Outline
+		Bundle.Lines[Index] = Line
+	end
+	CrateScannerBundles[#CrateScannerBundles + 1] = Bundle
+	return Bundle
 end
+
+local function HideCrateScannerBundle(Bundle)
+	SetDrawingProperty(Bundle.Label, "Visible", false)
+	for Index = 1, 8 do
+		SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
+		SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
+	end
+end
+
+local function HideAllCrateScannerBundles()
+	for _, Bundle in ipairs(CrateScannerBundles) do
+		HideCrateScannerBundle(Bundle)
+	end
+end
+
+local function SetScannerLine(Line, From, To, Color, Alpha)
+	SetDrawingProperty(Line, "From", From)
+	SetDrawingProperty(Line, "To", To)
+	SetDrawingProperty(Line, "Color", Color)
+	SetDrawingProperty(Line, "Transparency", Alpha)
+	SetDrawingProperty(Line, "Visible", true)
+end
+
+local function DrawScannerCorners(Bundle, X, Y, Width, Height)
+	local Left = X
+	local Right = X + Width
+	local Top = Y
+	local Bottom = Y + Height
+	local CornerWidth = math.max(3, Width * 0.25)
+	local CornerHeight = math.max(3, Height * 0.25)
+	local Segments = {
+		{ Vector2.new(Left, Top), Vector2.new(Left + CornerWidth, Top) },
+		{ Vector2.new(Left, Top), Vector2.new(Left, Top + CornerHeight) },
+		{ Vector2.new(Right, Top), Vector2.new(Right - CornerWidth, Top) },
+		{ Vector2.new(Right, Top), Vector2.new(Right, Top + CornerHeight) },
+		{ Vector2.new(Left, Bottom), Vector2.new(Left + CornerWidth, Bottom) },
+		{ Vector2.new(Left, Bottom), Vector2.new(Left, Bottom - CornerHeight) },
+		{ Vector2.new(Right, Bottom), Vector2.new(Right - CornerWidth, Bottom) },
+		{ Vector2.new(Right, Bottom), Vector2.new(Right, Bottom - CornerHeight) },
+	}
+	for Index, Segment in ipairs(Segments) do
+		SetScannerLine(Bundle.Outlines[Index], Segment[1], Segment[2], Color3.fromRGB(0, 0, 0), 0.85)
+		SetScannerLine(Bundle.Lines[Index], Segment[1], Segment[2], Flags.CrateEspColor, Flags.CrateEspAlpha)
+	end
+end
+
+local function UpdateLiveCrateScannerOverlay()
+	if not Flags.CrateScannerEnabled then
+		HideAllCrateScannerBundles()
+		return
+	end
+
+	local RootPart = GetLocalRoot()
+	local Origin = GetPartPosition(RootPart)
+	local ActiveBundles = {}
+	local BundleIndex = 0
+	for _, Target in ipairs(CrateScannerTargets) do
+		local Position = GetPartPosition(Target.Part)
+		if Position and Origin then
+			local Distance = (Position - Origin).Magnitude
+			if Distance <= CRATE_SCANNER_RADIUS then
+				local Center, OnScreen = ProjectToScreen(Position)
+				if Center and Center.Z > 0 and OnScreen then
+					local MarkerSize = Clamp(44 - Distance, 12, 32)
+					local X = Center.X - MarkerSize * 0.5
+					local Y = Center.Y - MarkerSize * 0.5
+					BundleIndex = BundleIndex + 1
+					local Bundle = CrateScannerBundles[BundleIndex] or CreateCrateScannerBundle()
+					if Bundle then
+						if Flags.CrateEspBox then
+							DrawScannerCorners(Bundle, X, Y, MarkerSize, MarkerSize)
+						else
+							for Index = 1, 8 do
+								SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
+								SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
+							end
+						end
+						SetDrawingProperty(Bundle.Label, "Text", Target.DisplayName
+							.. "  ["
+							.. tostring(math.floor(Distance + 0.5))
+							.. "u]")
+						SetDrawingProperty(Bundle.Label, "Position", Vector2.new(Center.X, Y - 15))
+						SetDrawingProperty(Bundle.Label, "Color", Flags.CrateEspColor)
+						SetDrawingProperty(Bundle.Label, "Transparency", Flags.CrateEspAlpha)
+						SetDrawingProperty(Bundle.Label, "Visible", true)
+						ActiveBundles[Bundle] = true
+					end
+				end
+			end
+		end
+	end
+
+	for _, Bundle in ipairs(CrateScannerBundles) do
+		if not ActiveBundles[Bundle] then
+			HideCrateScannerBundle(Bundle)
+		end
+	end
+end
+
+local ScannerRefreshAccumulator = CRATE_SCANNER_REFRESH_INTERVAL
+TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
+	if not Flags.Running then
+		return
+	end
+	if not Flags.CrateScannerEnabled then
+		ScannerRefreshAccumulator = CRATE_SCANNER_REFRESH_INTERVAL
+		CrateScannerTargets = {}
+		CrateScannerMetadataCache = {}
+		return
+	end
+	ScannerRefreshAccumulator = ScannerRefreshAccumulator + DeltaTime
+	if ScannerRefreshAccumulator >= CRATE_SCANNER_REFRESH_INTERVAL then
+		ScannerRefreshAccumulator = 0
+		task.defer(RefreshLiveCrateScanner)
+	end
+end))
 
 TrackConnection(RunService.RenderStepped:Connect(function()
 	if not Flags.Running then
@@ -2154,6 +2384,15 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 	local Success, ErrorMessage = pcall(UpdateEspFrame)
 	if not Success then
 		ReportEspError("ESP frame failed", ErrorMessage)
+	end
+
+	local ScannerSuccess, ScannerError = pcall(UpdateLiveCrateScannerOverlay)
+	if not ScannerSuccess then
+		HideAllCrateScannerBundles()
+		if not CrateScannerErrorReported then
+			CrateScannerErrorReported = true
+			warn("live crate scanner overlay failed: " .. tostring(ScannerError))
+		end
 	end
 end))
 
