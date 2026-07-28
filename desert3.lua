@@ -687,7 +687,7 @@ AimbotSection:Toggle("sticky aim", true, function(Value)
 	ClearLock()
 end):Tooltip("Keeps the current target after it leaves the FOV. Releasing the aim key still clears it.")
 
-local DrawFovToggle = TargetSection:Toggle("draw fov", Flags.DrawFov, function(Value)
+local DrawFovToggle = AimbotSection:Toggle("draw fov", Flags.DrawFov, function(Value)
 	Flags.DrawFov = Value
 end):Tooltip("Show or hide the FOV circle without changing target selection.")
 
