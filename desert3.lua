@@ -652,7 +652,6 @@ end
 
 local AimTab = Win:Tab("AIM", "crosshair")
 local AimbotSection = AimTab:Section("aimbot", "Left")
-local TargetSection = AimTab:Section("target selection", "Left")
 local PredictionSection = AimTab:Section("prediction", "Right")
 local SilentSection = AimTab:Section("silent aim", "Right")
 
@@ -695,6 +694,8 @@ DrawFovToggle:AddColorpicker("fov color", Flags.FovColor, function(Color, Alpha)
 	Flags.FovColor = Color
 	Flags.FovAlpha = Alpha
 end)
+
+local TargetSection = AimTab:Section("target selection", "Left")
 
 local FovRadiusSlider = TargetSection:Slider("fov radius", Flags.FovRadius, 1, 10, 400, "px", function(Value)
 	Flags.FovRadius = Value
