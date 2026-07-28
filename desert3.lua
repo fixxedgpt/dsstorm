@@ -79,6 +79,8 @@ local Flags = {
 	EspTextColor = Color3.fromRGB(235, 235, 235),
 	EspTextAlpha = 1,
 	EspMaxDistance = 2500,
+	IngameRadio = false,
+	IngameRadioVolume = 50,
 	LockedPlayerName = nil,
 }
 
@@ -993,6 +995,21 @@ end):Tooltip("Player ESP range in Roblox studs.")
 
 EspRangeSection:Label(function()
 	return "status: " .. EspStatus.Text
+end)
+
+local MiscTab = Win:Tab("MISC", "code")
+local RadioSection = MiscTab:Section("radio", "Left")
+
+RadioSection:Toggle("Ingame Radio", Flags.IngameRadio, function(Value)
+	Flags.IngameRadio = Value
+end):Tooltip("Controls the background player when a compatible external playback source is connected.")
+
+RadioSection:Slider("volume", Flags.IngameRadioVolume, 1, 0, 100, "%", function(Value)
+	Flags.IngameRadioVolume = Value
+end)
+
+RadioSection:Label(function()
+	return Flags.IngameRadio and "status: external player not connected" or "status: off"
 end)
 
 local SettingsTab = Win:AddSettingsTab("cog")
