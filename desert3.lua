@@ -209,8 +209,6 @@ local function GetPingSeconds()
 		return CachedPingSeconds
 	end
 
-	-- GetPingValue reports round-trip milliseconds. Half of it is the useful
-	-- one-way estimate for leading a server-authoritative shot.
 	CachedPingSeconds = Clamp(Ping / 2000, 0, 0.35)
 	return CachedPingSeconds
 end
@@ -532,6 +530,10 @@ local function AddUiStatusEntrySupport(Source)
 			[=[if eh and eh.value and not eh.listening and not e1(dU)then]=],
 			[=[if eh and eh.value and not eh.statusOnly and not eh.listening and not e1(dU)then]=],
 		},
+		{
+			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)if ld then]=],
+			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)cb(bh+2,bi+2,(bj-4)/3,1,y(72,149,184),y(151,95,172),13,g)cb(bh+2+(bj-4)/3,bi+2,(bj-4)/3,1,y(151,95,172),y(202,86,94),13,g)cb(bh+2+2*(bj-4)/3,bi+2,(bj-4)/3,1,y(202,86,94),y(156,192,73),13,g)if ld then]=],
+		},
 	}
 
 	for PatchIndex, Patch in Patches do
@@ -556,8 +558,6 @@ local function LoadUiLibrary()
 		assert(type(Chunk) == "function", "UI library compilation failed")
 
 		local LoadedLibrary = Chunk()
-		-- A destroyed INS-ui singleton cannot create another window. Executing
-		-- the source again replaces its global instance and stops its old loop.
 		return LoadedLibrary or INSui
 	end)
 
@@ -764,8 +764,6 @@ local function SetAimProfile(Value)
 		return
 	end
 
-	-- Multi-select mode gives the dropdown its checkable appearance and permits
-	-- clearing it. If another preset is clicked, keep only that newest choice.
 	local ProfileName = Value[#Value]
 	if #Value > 1 and AimProfileDropdown then
 		UpdatingAimProfile = true
