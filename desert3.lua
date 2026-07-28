@@ -1853,7 +1853,7 @@ local CrateEspScanRunning = false
 local CrateEspScanRequested = false
 local CrateEspScanComplete = false
 local CRATE_SCAN_YIELD_EVERY = 250
-local CRATE_TARGET_LIMIT = 96
+local CRATE_TARGET_LIMIT = 512
 
 local CrateNameTokens = {
 	"crate",
@@ -1874,6 +1874,7 @@ local CrateNameTokens = {
 	"chest",
 	"airdrop",
 	"duffelbag",
+	"dufflebag",
 	"ammobox",
 	"lockedsafe",
 	"militarylaptop",
@@ -1894,6 +1895,7 @@ local ExplicitLootNameTokens = {
 	"cache",
 	"airdrop",
 	"duffelbag",
+	"dufflebag",
 	"ammobox",
 	"lockedsafe",
 	"militarylaptop",
@@ -2119,17 +2121,47 @@ local function CleanCrateName(Name)
 	Name = Name:gsub("(%a)(%d)", "%1 %2")
 	Name = Name:gsub("%s+", " "):gsub("%s+$", "")
 	local CompactName = CompactCrateText(Name)
-	if string.find(CompactName, "woodencrate", 1, true) then
-		return "Wooden Crate"
-	end
-	if string.find(CompactName, "ammocratelarge", 1, true) then
-		return "Ammo Crate Large"
-	end
 	if
 		string.find(CompactName, "t1stash2", 1, true)
 		or string.find(CompactName, "tistash2", 1, true)
 	then
 		return "Hidden Stash"
+	end
+	if string.find(CompactName, "civilianairdrop", 1, true) then
+		return "Civilian Airdrop"
+	end
+	if
+		string.find(CompactName, "duffelbag", 1, true)
+		or string.find(CompactName, "dufflebag", 1, true)
+	then
+		return "Duffel Bag"
+	end
+	if
+		string.find(CompactName, "ammocratelarge", 1, true)
+		or string.find(CompactName, "ammobox", 1, true)
+	then
+		return "Ammo Box"
+	end
+	if string.find(CompactName, "lockedsafe", 1, true) then
+		return "Locked Safe"
+	end
+	if string.find(CompactName, "specopssupplycrate", 1, true) then
+		return "Specops Supply Crate"
+	end
+	if string.find(CompactName, "doublemetalcrate", 1, true) then
+		return "Double Metal Crates"
+	end
+	if string.find(CompactName, "militarylaptop", 1, true) then
+		return "Military Laptop"
+	end
+	if string.find(CompactName, "woodencrate", 1, true) then
+		return "Wooden Crate"
+	end
+	if string.find(CompactName, "supplycrate", 1, true) then
+		return "Supply Crate"
+	end
+	if string.find(CompactName, "metalcrate", 1, true) then
+		return "Metal Crate"
 	end
 	if string.lower(Name) == "crates" then
 		return "Crate"
@@ -2382,6 +2414,11 @@ local function RefreshCrateTargets()
 	if not Flags.Running then
 		return
 	end
+	for Identity, Target in CrateEspTargets do
+		if not FoundTargets[Identity] then
+			FoundTargets[Identity] = Target
+		end
+	end
 	CrateEspTargets = FoundTargets
 end
 
@@ -2421,6 +2458,84 @@ local function StartCrateEspScan()
 		end
 	end)
 end
+
+local function CacheStaticCrateInstance(Instance, LabelHint, Trusted, PreferLabelHint)
+	local Candidate = ResolveCrateCandidate(Instance)
+	local LootableRoot = FindLootableCrateRoot(Candidate, Trusted)
+	if not Candidate or not LootableRoot then
+		return
+	end
+
+	local CandidateName = GetInstanceName(Candidate)
+	local DisplaySource = PreferLabelHint and LabelHint
+		or (IsCrateName(CandidateName) and CandidateName or LabelHint)
+	local DisplayName = CleanCrateName(DisplaySource)
+	local Category = StaticCrateTypeSet[DisplayName]
+	if not Category then
+		return
+	end
+
+	local Part = FindCratePart(LootableRoot) or FindCratePart(Candidate)
+	local Position = GetPartPosition(Part)
+	if not Part or not Position then
+		return
+	end
+
+	local Identity = GetInstanceIdentity(LootableRoot)
+	local ExistingTarget = CrateEspTargets[Identity]
+	if ExistingTarget then
+		if PreferLabelHint then
+			ExistingTarget.DisplayName = DisplayName
+			ExistingTarget.Category = Category
+		end
+		return
+	end
+
+	CrateEspTargets[Identity] = {
+		Instance = LootableRoot,
+		SourceInstance = Candidate,
+		Part = Part,
+		DisplayName = DisplayName,
+		Category = Category,
+		AnchorPosition = Position,
+		MemberCount = 1,
+	}
+end
+
+-- DesertStorm streams map regions. Cache a prompted container once when it
+-- becomes visible to the client; its saved world position remains static.
+pcall(function()
+	local ProximityPromptService = game:GetService("ProximityPromptService")
+	TrackConnection(ProximityPromptService.PromptShown:Connect(function(Prompt)
+		if not Flags.Running or not Flags.CrateEspEnabled then
+			return
+		end
+		local Label = GetLootPromptLabel(Prompt)
+		if Label then
+			pcall(CacheStaticCrateInstance, GetInstanceParent(Prompt), Label, true, true)
+		end
+	end))
+end)
+
+-- Hidden stashes do not always expose an on-screen prompt. This guarded hook
+-- only recognizes their exact internal model alias and never rescans Workspace.
+pcall(function()
+	TrackConnection(Workspace.DescendantAdded:Connect(function(Instance)
+		if not Flags.Running or not Flags.CrateEspEnabled then
+			return
+		end
+		local CompactName = CompactCrateText(GetInstanceName(Instance))
+		if
+			not string.find(CompactName, "t1stash2", 1, true)
+			and not string.find(CompactName, "tistash2", 1, true)
+		then
+			return
+		end
+		task.defer(function()
+			pcall(CacheStaticCrateInstance, Instance, "Hidden Stash", true, true)
+		end)
+	end))
+end)
 
 local function CreateCrateEspBundle()
 	local Bundle = {
