@@ -1,10 +1,6 @@
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
-local ProximityPromptService
-pcall(function()
-	ProximityPromptService = game:GetService("ProximityPromptService")
-end)
 local LocalPlayer = Players.LocalPlayer
 local DESERT_STORM_GAME_ID = 9161571268
 
@@ -1046,24 +1042,25 @@ end)
 
 CrateEspSection:Toggle("case scanner", false, function(Value)
 	Flags.CrateScannerEnabled = Value
-	CrateScannerStatus.Text = Value and "aim at a container" or "off"
-end):Tooltip("Only inspects the case directly under your crosshair for Container/Containers markers.")
+	CrateScannerStatus.Text = Value and "manual 35u scan ready" or "off"
+end):Tooltip("Enables a manual, capped spatial scan for nearby crate/container Workspace IDs.")
 
 CrateEspSection:Label(function()
 	return "scanner: " .. CrateScannerStatus.Text
 end)
 
-CrateEspSection:Button("scan aimed container", function()
+CrateEspSection:Button("scan crate IDs [35u]", function()
 	if CaptureAimedCrate then
-		CaptureAimedCrate()
+		CrateScannerStatus.Text = "scanning 35u..."
+		task.defer(CaptureAimedCrate)
 	end
-end):Tooltip("Manually scans only the case under your crosshair. No radius or Workspace scan.")
+end):Tooltip("Runs one 35-stud spatial query now. It does not continue scanning afterward.")
 
 CrateEspSection:Button("copy workspace id", function()
 	if CopyCrateScannerReport then
 		CopyCrateScannerReport()
 	end
-end):Tooltip("Copies the aimed case's Container owner and Workspace hierarchy.")
+end):Tooltip("Copies the raw names, exposed IDs, paths and attributes from the last 35u scan.")
 
 local SettingsTab = Win:AddSettingsTab("cog")
 local ScriptSettingsSection = SettingsTab:Section("script", "Right")
@@ -1835,6 +1832,25 @@ local function UpdateEspFrame()
 	end
 end
 
+local CRATE_SCANNER_RADIUS = 35
+local CRATE_SCANNER_PART_LIMIT = 256
+local CrateScannerTokens = {
+	"crate",
+	"container",
+	"duffel",
+	"bag",
+	"case",
+	"stash",
+	"airdrop",
+	"supply",
+	"safe",
+	"loot",
+	"ammo",
+	"storage",
+	"laptop",
+	"box",
+}
+
 local function GetScannerName(Instance)
 	local Name
 	pcall(function()
@@ -1851,20 +1867,20 @@ local function GetScannerClass(Instance)
 	return type(ClassName) == "string" and ClassName or "Instance"
 end
 
-local function GetScannerParent(Instance)
-	local Parent
-	pcall(function()
-		Parent = Instance and Instance.Parent
-	end)
-	return Parent
-end
-
 local function GetScannerPath(Instance)
 	local FullName
 	pcall(function()
 		FullName = Instance and Instance:GetFullName()
 	end)
 	return type(FullName) == "string" and FullName or GetScannerName(Instance)
+end
+
+local function GetScannerParent(Instance)
+	local Parent
+	pcall(function()
+		Parent = Instance and Instance.Parent
+	end)
+	return Parent
 end
 
 local function ScannerIsA(Instance, ClassName)
@@ -1874,220 +1890,235 @@ local function ScannerIsA(Instance, ClassName)
 	return Success and Result
 end
 
-local function IsContainerMarker(Instance)
-	local Name = string.lower(GetScannerName(Instance))
-	local ClassName = string.lower(GetScannerClass(Instance))
-	if Name == "container"
-		or Name == "containers"
-		or ClassName == "container"
-		or ClassName == "containers"
-	then
-		return true
+local function GetScannerAttributes(Instance)
+	local Attributes = {}
+	pcall(function()
+		Attributes = Instance:GetAttributes()
+	end)
+	local Parts = {}
+	for Key, Value in pairs(Attributes) do
+		local ValueType = type(Value)
+		if ValueType == "string" or ValueType == "number" or ValueType == "boolean" then
+			Parts[#Parts + 1] = tostring(Key) .. "=" .. tostring(Value)
+			if #Parts >= 12 then
+				break
+			end
+		end
 	end
-
-	if ScannerIsA(Instance, "ProximityPrompt") then
-		local ActionText = ""
-		local ObjectText = ""
-		pcall(function()
-			ActionText = string.lower(tostring(Instance.ActionText or ""))
-			ObjectText = string.lower(tostring(Instance.ObjectText or ""))
-		end)
-		return string.find(ActionText, "container", 1, true) ~= nil
-			or string.find(ObjectText, "container", 1, true) ~= nil
-	end
-	return false
+	table.sort(Parts)
+	return table.concat(Parts, ", ")
 end
 
-local ActiveContainerPrompt
-local function GetAimedScannerInstance()
-	if ActiveContainerPrompt then
-		return ActiveContainerPrompt
+local function MatchScannerToken(Value)
+	local LowerValue = string.lower(tostring(Value or ""))
+	for _, Token in ipairs(CrateScannerTokens) do
+		if string.find(LowerValue, Token, 1, true) then
+			return Token
+		end
 	end
-	local Target
-	pcall(function()
-		Target = LocalPlayer:GetMouse().Target
-	end)
-	if Target then
-		return Target
-	end
-
-	local Camera = Workspace.CurrentCamera
-	if not Camera then
-		return nil
-	end
-	local RaycastResult
-	pcall(function()
-		local Parameters = RaycastParams.new()
-		Parameters.FilterType = Enum.RaycastFilterType.Exclude
-		Parameters.FilterDescendantsInstances = {
-			LocalPlayer.Character,
-			Camera,
-		}
-		RaycastResult = Workspace:Raycast(
-			Camera.CFrame.Position,
-			Camera.CFrame.LookVector * 1000,
-			Parameters
-		)
-	end)
-	return RaycastResult and RaycastResult.Instance or nil
+	return nil
 end
 
-local function FindScannerRoot(Target)
-	local Cursor = Target
-	local Fallback = Target
+local function HasScannerHumanoidAncestor(Instance)
+	local Cursor = Instance
 	for _ = 1, 5 do
 		if not Cursor or Cursor == Workspace then
 			break
 		end
-		if ScannerIsA(Cursor, "Model") then
-			return Cursor
-		end
-		Fallback = Cursor
-		Cursor = GetScannerParent(Cursor)
-	end
-	return Fallback
-end
-
-local function FindContainerOwner(Marker, ScannerRoot)
-	local Cursor = Marker
-	for _ = 1, 7 do
-		if not Cursor or Cursor == Workspace then
-			break
-		end
-		local Name = string.lower(GetScannerName(Cursor))
-		if ScannerIsA(Cursor, "Model") and Name ~= "container" and Name ~= "containers" then
-			return Cursor
-		end
-		if Cursor == ScannerRoot then
-			break
+		local Humanoid
+		pcall(function()
+			Humanoid = Cursor:FindFirstChildOfClass("Humanoid")
+		end)
+		if Humanoid then
+			return true
 		end
 		Cursor = GetScannerParent(Cursor)
 	end
-	return ScannerRoot or GetScannerParent(Marker) or Marker
+	return false
 end
 
-local function CollectLocalContainerMarkers(Root)
-	local Matches = {}
-	local Seen = {}
-	local Queue = {
-		{ Instance = Root, Depth = 0 },
-	}
-	local QueueIndex = 1
-
-	while QueueIndex <= #Queue and QueueIndex <= 128 do
-		local Item = Queue[QueueIndex]
-		QueueIndex = QueueIndex + 1
-		local Instance = Item.Instance
-		if Instance and not Seen[Instance] then
-			Seen[Instance] = true
-			if IsContainerMarker(Instance) then
-				Matches[#Matches + 1] = Instance
-			end
-			if Item.Depth < 6 then
-				local Children = {}
-				pcall(function()
-					Children = Instance:GetChildren()
-				end)
-				for _, Child in ipairs(Children) do
-					if #Queue < 128 then
-						Queue[#Queue + 1] = {
-							Instance = Child,
-							Depth = Item.Depth + 1,
-						}
-					end
-				end
-			end
-		end
+local function QueryNearbyScannerParts(Origin)
+	local Parts = {}
+	local Success = pcall(function()
+		local Parameters = OverlapParams.new()
+		Parameters.FilterType = Enum.RaycastFilterType.Exclude
+		Parameters.FilterDescendantsInstances = {
+			LocalPlayer.Character,
+			Workspace.CurrentCamera,
+		}
+		Parameters.MaxParts = CRATE_SCANNER_PART_LIMIT
+		Parts = Workspace:GetPartBoundsInRadius(
+			Origin,
+			CRATE_SCANNER_RADIUS,
+			Parameters
+		)
+	end)
+	if Success and type(Parts) == "table" then
+		return Parts
 	end
-	return Matches
+
+	pcall(function()
+		local Radius = Vector3.new(
+			CRATE_SCANNER_RADIUS,
+			CRATE_SCANNER_RADIUS,
+			CRATE_SCANNER_RADIUS
+		)
+		local Region = Region3.new(Origin - Radius, Origin + Radius)
+		Parts = Workspace:FindPartsInRegion3WithIgnoreList(
+			Region,
+			{ LocalPlayer.Character },
+			CRATE_SCANNER_PART_LIMIT
+		)
+	end)
+	return type(Parts) == "table" and Parts or {}
 end
 
-local LastScannerCaptureAt = -math.huge
-local LastScannerCapturePath
-local function CaptureAimedContainer(PreferredTarget)
+local CrateScannerScanRunning = false
+local function CaptureNearbyWorkspaceIds()
 	if not Flags.CrateScannerEnabled then
 		CrateScannerStatus.Text = "enable scanner first"
 		return
 	end
-
-	local Target = PreferredTarget or GetAimedScannerInstance()
-	if not Target then
-		CrateScannerStatus.Text = "aim at a case first"
+	if CrateScannerScanRunning then
+		CrateScannerStatus.Text = "scan already running"
 		return
 	end
-	local TargetPath = GetScannerPath(Target)
-	local Now = tick()
-	if TargetPath == LastScannerCapturePath and Now - LastScannerCaptureAt < 0.25 then
+
+	local RootPart = GetLocalRoot()
+	local Origin = GetPartPosition(RootPart)
+	if not Origin then
+		CrateScannerStatus.Text = "player position unavailable"
 		return
 	end
-	LastScannerCapturePath = TargetPath
-	LastScannerCaptureAt = Now
 
-	local Root = FindScannerRoot(Target)
-	local Markers = CollectLocalContainerMarkers(Root)
-	if IsContainerMarker(Target) then
-		local AlreadyIncluded = false
-		for _, Marker in ipairs(Markers) do
-			if Marker == Target then
-				AlreadyIncluded = true
-				break
+	CrateScannerScanRunning = true
+	CrateScannerStatus.Text = "scanning 35u..."
+	local NearbyParts = QueryNearbyScannerParts(Origin)
+	local Candidates = {}
+	local AttributeCache = {}
+
+	local function GetCachedAttributes(Instance)
+		local Cached = AttributeCache[Instance]
+		if Cached == nil then
+			Cached = GetScannerAttributes(Instance)
+			AttributeCache[Instance] = Cached
+		end
+		return Cached
+	end
+
+	local function AddCandidate(Instance, Distance, Reason)
+		if not Instance or Instance == Workspace then
+			return
+		end
+		local Identity = GetInstanceIdentity(Instance)
+		local Existing = Candidates[Identity]
+		if not Existing or Distance < Existing.Distance then
+			Candidates[Identity] = {
+				Instance = Instance,
+				Identity = Identity,
+				Distance = Distance,
+				Reason = Reason,
+				Attributes = GetCachedAttributes(Instance),
+			}
+		end
+	end
+
+	for PartIndex, Part in ipairs(NearbyParts) do
+		if ScannerIsA(Part, "BasePart") and not HasScannerHumanoidAncestor(Part) then
+			local Position = GetPartPosition(Part)
+			local Distance = Position and (Position - Origin).Magnitude or CRATE_SCANNER_RADIUS
+			local Chain = {}
+			local Cursor = Part
+			local MatchedAncestorIndex
+
+			for _ = 1, 7 do
+				if not Cursor or Cursor == Workspace then
+					break
+				end
+				Chain[#Chain + 1] = Cursor
+				local Attributes = GetCachedAttributes(Cursor)
+				local Token = MatchScannerToken(
+					GetScannerName(Cursor)
+						.. " "
+						.. GetScannerClass(Cursor)
+						.. " "
+						.. Attributes
+				)
+				if Token then
+					AddCandidate(Cursor, Distance, Token)
+					MatchedAncestorIndex = MatchedAncestorIndex or #Chain
+				end
+				Cursor = GetScannerParent(Cursor)
+			end
+
+			if MatchedAncestorIndex then
+				for Index = 1, MatchedAncestorIndex - 1 do
+					local Candidate = Chain[Index]
+					if ScannerIsA(Candidate, "Model") then
+						AddCandidate(Candidate, Distance, "owner")
+						break
+					end
+				end
 			end
 		end
-		if not AlreadyIncluded then
-			table.insert(Markers, 1, Target)
+		if PartIndex % 48 == 0 then
+			task.wait()
 		end
 	end
+
+	local Ordered = {}
+	for _, Candidate in pairs(Candidates) do
+		Ordered[#Ordered + 1] = Candidate
+	end
+	table.sort(Ordered, function(A, B)
+		if A.Distance == B.Distance then
+			return GetScannerName(A.Instance) < GetScannerName(B.Instance)
+		end
+		return A.Distance < B.Distance
+	end)
+
 	local Lines = {
-		"aimed object: " .. GetScannerPath(Target),
-		"local scanner root: " .. GetScannerPath(Root),
-		"container markers: " .. tostring(#Markers),
+		"manual crate/container scan radius: 35u",
+		"nearby parts checked: " .. tostring(#NearbyParts),
+		"matching workspace IDs: " .. tostring(#Ordered),
 	}
-
-	local SeenOwners = {}
-	for _, Marker in ipairs(Markers) do
-		local Owner = FindContainerOwner(Marker, Root)
-		local OwnerPath = GetScannerPath(Owner)
-		if not SeenOwners[OwnerPath] then
-			SeenOwners[OwnerPath] = true
-			Lines[#Lines + 1] = "raw="
-				.. GetScannerName(Owner)
-				.. " | owner_class="
-				.. GetScannerClass(Owner)
-				.. " | marker="
-				.. GetScannerName(Marker)
-				.. " | marker_class="
-				.. GetScannerClass(Marker)
-				.. " | path="
-				.. OwnerPath
-		end
-	end
-
-	Lines[#Lines + 1] = "aimed hierarchy:"
-	local Cursor = Target
-	for Level = 1, 7 do
-		if not Cursor then
+	for Index, Candidate in ipairs(Ordered) do
+		if Index > 96 then
 			break
 		end
-		Lines[#Lines + 1] = tostring(Level)
-			.. ". "
-			.. GetScannerClass(Cursor)
-			.. " | "
-			.. GetScannerPath(Cursor)
-		Cursor = GetScannerParent(Cursor)
+		local Instance = Candidate.Instance
+		local Line = tostring(Index)
+			.. ". raw="
+			.. GetScannerName(Instance)
+			.. " | class="
+			.. GetScannerClass(Instance)
+			.. " | id="
+			.. Candidate.Identity
+			.. " | match="
+			.. Candidate.Reason
+			.. " | distance="
+			.. tostring(math.floor(Candidate.Distance + 0.5))
+			.. "u | path="
+			.. GetScannerPath(Instance)
+		if Candidate.Attributes ~= "" then
+			Line = Line .. " | attributes={" .. Candidate.Attributes .. "}"
+		end
+		Lines[#Lines + 1] = Line
 	end
 
 	CrateScannerStatus.Report = table.concat(Lines, "\n")
-	CrateScannerStatus.Text = #Markers > 0
-			and ("captured case + " .. tostring(#Markers) .. " marker(s)")
-			or "captured aimed case (no marker)"
-	warn("case scanner captured:\n" .. CrateScannerStatus.Report)
+	CrateScannerStatus.Text = #Ordered > 0
+			and ("captured " .. tostring(#Ordered) .. " IDs [35u]")
+			or "no crate/container IDs [35u]"
+	CrateScannerScanRunning = false
+	warn("manual 35u crate scan:\n" .. CrateScannerStatus.Report)
 end
 
-CaptureAimedCrate = CaptureAimedContainer
+CaptureAimedCrate = CaptureNearbyWorkspaceIds
 
 CopyCrateScannerReport = function()
 	if CrateScannerStatus.Report == "" then
-		CrateScannerStatus.Text = "scan an aimed case first"
+		CrateScannerStatus.Text = "run 35u scan first"
 		return
 	end
 	local Clipboard = Environment.setclipboard or Environment.toclipboard
@@ -2096,7 +2127,7 @@ CopyCrateScannerReport = function()
 		return
 	end
 	local Success = pcall(Clipboard, CrateScannerStatus.Report)
-	CrateScannerStatus.Text = Success and "workspace ID copied" or "copy failed"
+	CrateScannerStatus.Text = Success and "workspace IDs copied" or "copy failed"
 end
 
 local ScannerInputConnection
@@ -2107,49 +2138,12 @@ pcall(function()
 			and Flags.CrateScannerEnabled
 			and Input.KeyCode == Enum.KeyCode.F
 		then
-			local Target = ActiveContainerPrompt
-			task.defer(function()
-				CaptureAimedContainer(Target)
-			end)
+			task.defer(CaptureNearbyWorkspaceIds)
 		end
 	end)
 end)
 if ScannerInputConnection then
 	TrackConnection(ScannerInputConnection)
-end
-
-if ProximityPromptService then
-	local PromptShownConnection
-	local PromptHiddenConnection
-	local PromptTriggeredConnection
-	pcall(function()
-		PromptShownConnection = ProximityPromptService.PromptShown:Connect(function(Prompt)
-			if IsContainerMarker(Prompt) then
-				ActiveContainerPrompt = Prompt
-			end
-		end)
-		PromptHiddenConnection = ProximityPromptService.PromptHidden:Connect(function(Prompt)
-			if ActiveContainerPrompt == Prompt then
-				ActiveContainerPrompt = nil
-			end
-		end)
-		PromptTriggeredConnection = ProximityPromptService.PromptTriggered:Connect(function(Prompt)
-			if Flags.Running and Flags.CrateScannerEnabled then
-				task.defer(function()
-					CaptureAimedContainer(Prompt)
-				end)
-			end
-		end)
-	end)
-	if PromptShownConnection then
-		TrackConnection(PromptShownConnection)
-	end
-	if PromptHiddenConnection then
-		TrackConnection(PromptHiddenConnection)
-	end
-	if PromptTriggeredConnection then
-		TrackConnection(PromptTriggeredConnection)
-	end
 end
 
 TrackConnection(RunService.RenderStepped:Connect(function()
