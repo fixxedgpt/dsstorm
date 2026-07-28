@@ -531,8 +531,16 @@ local function AddUiStatusEntrySupport(Source)
 			[=[if eh and eh.value and not eh.statusOnly and not eh.listening and not e1(dU)then]=],
 		},
 		{
+			[=[bg(ch,bi,cj,bk,cg[ae],aZ,0,bn)ch=ci end end;function aH.fadeLine]=],
+			[=[bg(ch,bi,cj,bk,cg[ae],aZ,0,bn)ch=ci end end;local function cbar(bh,bi,bj,bn,aZ)local bw=(bj-2)/3;bg(bh+1,bi+1,bj-2,3,y(0,0,0),aZ,0,bn)cb(bh+1,bi+1,bw,2,y(72,149,184),y(151,95,172),aZ+1,bn)cb(bh+1+bw,bi+1,bw,2,y(151,95,172),y(202,86,94),aZ+1,bn)cb(bh+1+bw*2,bi+1,bw,2,y(202,86,94),y(156,192,73),aZ+1,bn)end;function aH.fadeLine]=],
+		},
+		{
 			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)if ld then]=],
-			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)bg(bh+1,bi+1,bj-2,3,y(0,0,0),89,0,g)cb(bh+1,bi+1,(bj-2)/3,2,y(72,149,184),y(151,95,172),90,g)cb(bh+1+(bj-2)/3,bi+1,(bj-2)/3,2,y(151,95,172),y(202,86,94),90,g)cb(bh+1+2*(bj-2)/3,bi+1,(bj-2)/3,2,y(202,86,94),y(156,192,73),90,g)if ld then]=],
+			[=[bs(bh,bi,bj,bk,as,12,8,av.hairline*g)cbar(bh,bi,bj,g,89)if ld then]=],
+		},
+		{
+			[=[bs(bh,bi,bj,bk,as,151,8,av.cardStrk*ag)bX("keybinds"]=],
+			[=[bs(bh,bi,bj,bk,as,151,8,av.cardStrk*ag)cbar(bh,bi,bj,ag,154)bX("keybinds"]=],
 		},
 	}
 
@@ -540,7 +548,6 @@ local function AddUiStatusEntrySupport(Source)
 		local Applied
 		Source, Applied = ReplacePlainOnce(Source, Patch[1], Patch[2])
 		if not Applied then
-			warn("UI status-entry patch " .. tostring(PatchIndex) .. " is unavailable; using the stock UI.")
 			return OriginalSource, false
 		end
 	end
@@ -602,9 +609,6 @@ if not WindowSuccess or not WindowResult then
 end
 
 Win = WindowResult
-pcall(function()
-	Win:SetTitle("virtuosity")
-end)
 
 local VirtuosityGreen = Color3.fromRGB(149, 192, 33)
 local ThemeSuccess, ThemeError = pcall(function()
