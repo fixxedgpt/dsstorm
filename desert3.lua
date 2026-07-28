@@ -108,7 +108,6 @@ local CrateTrackChoices = {
 	"All crates",
 }
 local CrateOtherChoices = { "Hidden Stash" }
-local RequestCrateEspScan
 local CopyCrateScannerReport
 local CaptureAimedCrate
 local SilentAimStatus = {
@@ -979,10 +978,7 @@ end)
 
 local CrateEspToggle = CrateEspSection:Toggle("enabled", false, function(Value)
 	Flags.CrateEspEnabled = Value
-	CrateEspStatus.Text = Value and "scanning..." or "off"
-	if Value and RequestCrateEspScan then
-		RequestCrateEspScan(false)
-	end
+	CrateEspStatus.Text = Value and "waiting for scanned IDs" or "off"
 end)
 
 CrateEspToggle:AddColorpicker("crate color", Flags.CrateEspColor, function(Color, Alpha)
@@ -1046,24 +1042,24 @@ end)
 
 CrateEspSection:Toggle("case scanner", false, function(Value)
 	Flags.CrateScannerEnabled = Value
-	CrateScannerStatus.Text = Value and "stand beside a container" or "off"
-end):Tooltip("Indexes actual Container markers; stand near or aim at a case to inspect its raw Workspace identity.")
+	CrateScannerStatus.Text = Value and "aim at a container" or "off"
+end):Tooltip("Only inspects the case directly under your crosshair for Container/Containers markers.")
 
 CrateEspSection:Label(function()
 	return "scanner: " .. CrateScannerStatus.Text
 end)
 
-CrateEspSection:Button("scan nearby containers", function()
+CrateEspSection:Button("scan aimed container", function()
 	if CaptureAimedCrate then
 		CaptureAimedCrate()
 	end
-end):Tooltip("Captures Container owners within 35 studs plus the object under your crosshair.")
+end):Tooltip("Manually scans only the case under your crosshair. No radius or Workspace scan.")
 
 CrateEspSection:Button("copy workspace id", function()
 	if CopyCrateScannerReport then
 		CopyCrateScannerReport()
 	end
-end):Tooltip("Copies the nearby Container owners and aimed Workspace hierarchy.")
+end):Tooltip("Copies the aimed case's Container owner and Workspace hierarchy.")
 
 local SettingsTab = Win:AddSettingsTab("cog")
 local ScriptSettingsSection = SettingsTab:Section("script", "Right")
@@ -1835,24 +1831,7 @@ local function UpdateEspFrame()
 	end
 end
 
-local CrateEspBundles = {}
-local CrateEspTargets = {}
-local CrateContainerMarkers = {}
-local CrateEspScanRunning = false
-local CrateEspScanRequested = false
-local CrateEspScanComplete = false
-local CrateEspErrorReported = false
-local CRATE_SCAN_YIELD_EVERY = 120
-local CRATE_TARGET_LIMIT = 512
-
-local function CrateSafeIsA(Instance, ClassName)
-	local Success, Result = pcall(function()
-		return Instance and Instance:IsA(ClassName)
-	end)
-	return Success and Result
-end
-
-local function GetCrateInstanceName(Instance)
+local function GetScannerName(Instance)
 	local Name
 	pcall(function()
 		Name = Instance and Instance.Name
@@ -1860,7 +1839,7 @@ local function GetCrateInstanceName(Instance)
 	return type(Name) == "string" and Name or ""
 end
 
-local function GetCrateClassName(Instance)
+local function GetScannerClass(Instance)
 	local ClassName
 	pcall(function()
 		ClassName = Instance and Instance.ClassName
@@ -1868,7 +1847,7 @@ local function GetCrateClassName(Instance)
 	return type(ClassName) == "string" and ClassName or "Instance"
 end
 
-local function GetCrateParent(Instance)
+local function GetScannerParent(Instance)
 	local Parent
 	pcall(function()
 		Parent = Instance and Instance.Parent
@@ -1876,43 +1855,33 @@ local function GetCrateParent(Instance)
 	return Parent
 end
 
-local function GetCrateFullName(Instance)
+local function GetScannerPath(Instance)
 	local FullName
 	pcall(function()
 		FullName = Instance and Instance:GetFullName()
 	end)
-	return type(FullName) == "string" and FullName or GetCrateInstanceName(Instance)
+	return type(FullName) == "string" and FullName or GetScannerName(Instance)
 end
 
-local function CompactCrateName(Value)
-	return string.lower(tostring(Value or "")):gsub("[^%w]", "")
-end
-
-local function GetConfirmedCrateAlias(Instance)
-	local Cursor = Instance
-	for _ = 1, 6 do
-		local CompactName = CompactCrateName(GetCrateInstanceName(Cursor))
-		if string.find(CompactName, "t1stash2", 1, true)
-			or string.find(CompactName, "tistash2", 1, true)
-		then
-			return "Hidden Stash", "Others"
-		end
-		Cursor = GetCrateParent(Cursor)
-		if not Cursor or Cursor == Workspace then
-			break
-		end
-	end
-	return nil, nil
+local function ScannerIsA(Instance, ClassName)
+	local Success, Result = pcall(function()
+		return Instance and Instance:IsA(ClassName)
+	end)
+	return Success and Result
 end
 
 local function IsContainerMarker(Instance)
-	local Name = string.lower(GetCrateInstanceName(Instance))
-	local ClassName = string.lower(GetCrateClassName(Instance))
-	if Name == "container" or ClassName == "container" then
+	local Name = string.lower(GetScannerName(Instance))
+	local ClassName = string.lower(GetScannerClass(Instance))
+	if Name == "container"
+		or Name == "containers"
+		or ClassName == "container"
+		or ClassName == "containers"
+	then
 		return true
 	end
 
-	if CrateSafeIsA(Instance, "ProximityPrompt") then
+	if ScannerIsA(Instance, "ProximityPrompt") then
 		local ActionText = ""
 		local ObjectText = ""
 		pcall(function()
@@ -1925,349 +1894,170 @@ local function IsContainerMarker(Instance)
 	return false
 end
 
-local function HasHumanoidAncestor(Instance)
-	local Cursor = Instance
+local function GetAimedScannerInstance()
+	local Camera = Workspace.CurrentCamera
+	if Camera then
+		local RaycastResult
+		pcall(function()
+			local Parameters = RaycastParams.new()
+			Parameters.FilterType = Enum.RaycastFilterType.Exclude
+			Parameters.FilterDescendantsInstances = {
+				LocalPlayer.Character,
+				Camera,
+			}
+			RaycastResult = Workspace:Raycast(
+				Camera.CFrame.Position,
+				Camera.CFrame.LookVector * 1000,
+				Parameters
+			)
+		end)
+		if RaycastResult and RaycastResult.Instance then
+			return RaycastResult.Instance
+		end
+	end
+
+	local Target
+	pcall(function()
+		Target = LocalPlayer:GetMouse().Target
+	end)
+	return Target
+end
+
+local function FindScannerRoot(Target)
+	local Cursor = Target
+	local Fallback = Target
 	for _ = 1, 5 do
 		if not Cursor or Cursor == Workspace then
 			break
 		end
-		local Humanoid
-		pcall(function()
-			Humanoid = Cursor:FindFirstChildOfClass("Humanoid")
-		end)
-		if Humanoid then
-			return true
+		if ScannerIsA(Cursor, "Model") then
+			return Cursor
 		end
-		Cursor = GetCrateParent(Cursor)
+		Fallback = Cursor
+		Cursor = GetScannerParent(Cursor)
 	end
-	return false
+	return Fallback
 end
 
-local function FindCratePart(Instance)
-	if CrateSafeIsA(Instance, "BasePart") then
-		return Instance
-	end
-
-	local PrimaryPart
-	pcall(function()
-		PrimaryPart = Instance and Instance.PrimaryPart
-	end)
-	if CrateSafeIsA(PrimaryPart, "BasePart") then
-		return PrimaryPart
-	end
-
-	local NamedPart
-	for _, Name in ipairs({ "Main", "Root", "Handle", "Base", "Hitbox" }) do
-		pcall(function()
-			NamedPart = Instance and Instance:FindFirstChild(Name, true)
-		end)
-		if CrateSafeIsA(NamedPart, "BasePart") then
-			return NamedPart
-		end
-	end
-
-	local AnyPart
-	pcall(function()
-		AnyPart = Instance and Instance:FindFirstChildWhichIsA("BasePart", true)
-	end)
-	return CrateSafeIsA(AnyPart, "BasePart") and AnyPart or nil
-end
-
-local function ResolveContainerOwner(Marker)
-	local BestOwner
-	local BestPart
+local function FindContainerOwner(Marker, ScannerRoot)
 	local Cursor = Marker
-	for _ = 1, 6 do
+	for _ = 1, 7 do
 		if not Cursor or Cursor == Workspace then
 			break
 		end
-		local Part = FindCratePart(Cursor)
-		if Part then
-			if not BestPart then
-				BestOwner = Cursor
-				BestPart = Part
-			end
-			local Name = string.lower(GetCrateInstanceName(Cursor))
-			if
-				CrateSafeIsA(Cursor, "Model")
-				and Name ~= ""
-				and Name ~= "container"
-			then
-				return Cursor, Part
-			end
+		local Name = string.lower(GetScannerName(Cursor))
+		if ScannerIsA(Cursor, "Model") and Name ~= "container" and Name ~= "containers" then
+			return Cursor
 		end
-		Cursor = GetCrateParent(Cursor)
+		if Cursor == ScannerRoot then
+			break
+		end
+		Cursor = GetScannerParent(Cursor)
 	end
-	return BestOwner, BestPart
+	return ScannerRoot or GetScannerParent(Marker) or Marker
 end
 
-local function ResolveCrateCandidate(Instance)
-	local DisplayName, Category = GetConfirmedCrateAlias(Instance)
-	if DisplayName then
-		local Owner, Part = ResolveContainerOwner(Instance)
-		Owner = Owner or Instance
-		Part = Part or FindCratePart(Owner)
-		return Owner, Part, DisplayName, Category
-	end
-
-	if not IsContainerMarker(Instance) then
-		return nil
-	end
-	local Owner, Part = ResolveContainerOwner(Instance)
-	if not Owner or not Part or HasHumanoidAncestor(Owner) then
-		return nil
-	end
-
-	local RawName = GetCrateInstanceName(Owner)
-	if RawName == "" or string.lower(RawName) == "container" then
-		RawName = GetCrateInstanceName(GetCrateParent(Owner))
-	end
-	if RawName == "" then
-		RawName = "Container"
-	end
-	return Owner, Part, RawName, "Crates"
-end
-
-local function CacheCrateTarget(TargetMap, Instance)
-	local Owner, Part, DisplayName, Category = ResolveCrateCandidate(Instance)
-	if not Owner or not Part or not DisplayName then
-		return false
-	end
-
-	local Key = GetInstanceIdentity(Part)
-	if not Key or TargetMap[Key] then
-		return false
-	end
-	TargetMap[Key] = {
-		Owner = Owner,
-		Part = Part,
-		Marker = IsContainerMarker(Instance) and Instance or nil,
-		DisplayName = DisplayName,
-		RawName = GetCrateInstanceName(Owner),
-		Category = Category,
+local function CollectLocalContainerMarkers(Root)
+	local Matches = {}
+	local Seen = {}
+	local Queue = {
+		{ Instance = Root, Depth = 0 },
 	}
-	if IsContainerMarker(Instance) then
-		CrateContainerMarkers[#CrateContainerMarkers + 1] = TargetMap[Key]
-	end
-	return true
-end
-
-local function RefreshCrateTargetsByName()
-	local TargetMap = {}
-	local Queue = { Workspace }
 	local QueueIndex = 1
-	local Visited = 0
-	CrateContainerMarkers = {}
 
-	while QueueIndex <= #Queue and #CrateContainerMarkers < CRATE_TARGET_LIMIT do
-		if not Flags.Running then
-			return
-		end
-		local Parent = Queue[QueueIndex]
+	while QueueIndex <= #Queue and QueueIndex <= 128 do
+		local Item = Queue[QueueIndex]
 		QueueIndex = QueueIndex + 1
-
-		local Children = {}
-		pcall(function()
-			Children = Parent:GetChildren()
-		end)
-		for _, Child in ipairs(Children) do
-			Queue[#Queue + 1] = Child
-			CacheCrateTarget(TargetMap, Child)
-			Visited = Visited + 1
-			if Visited % CRATE_SCAN_YIELD_EVERY == 0 then
-				task.wait()
+		local Instance = Item.Instance
+		if Instance and not Seen[Instance] then
+			Seen[Instance] = true
+			if IsContainerMarker(Instance) then
+				Matches[#Matches + 1] = Instance
+			end
+			if Item.Depth < 6 then
+				local Children = {}
+				pcall(function()
+					Children = Instance:GetChildren()
+				end)
+				for _, Child in ipairs(Children) do
+					if #Queue < 128 then
+						Queue[#Queue + 1] = {
+							Instance = Child,
+							Depth = Item.Depth + 1,
+						}
+					end
+				end
 			end
 		end
 	end
-
-	for Key, Existing in pairs(CrateEspTargets) do
-		if not TargetMap[Key] then
-			local StillPresent = false
-			pcall(function()
-				StillPresent = Existing.Part and Existing.Part:IsDescendantOf(Workspace)
-			end)
-			if StillPresent then
-				TargetMap[Key] = Existing
-			end
-		end
-	end
-	CrateEspTargets = TargetMap
+	return Matches
 end
 
-local function StartCrateEspScan()
-	if CrateEspScanRunning then
-		CrateEspScanRequested = true
-		return
-	end
-	CrateEspScanRunning = true
-	CrateEspScanRequested = false
-	CrateEspStatus.Text = "indexing containers..."
-
-	task.spawn(function()
-		local Success, ErrorMessage = pcall(RefreshCrateTargetsByName)
-		CrateEspScanRunning = false
-		CrateEspScanComplete = Success
-		if not Success then
-			CrateEspStatus.Text = "scan unavailable"
-			if not CrateEspErrorReported then
-				CrateEspErrorReported = true
-				warn("crate index failed: " .. tostring(ErrorMessage))
-			end
-		elseif Flags.CrateEspEnabled then
-			CrateEspStatus.Text = tostring(#CrateContainerMarkers) .. " containers indexed"
-		end
-		if CrateEspScanRequested and Flags.Running then
-			StartCrateEspScan()
-		end
-	end)
-end
-
-RequestCrateEspScan = function(Force)
-	if Force then
-		CrateEspScanComplete = false
-	end
-	if CrateEspScanComplete and not Force then
-		return
-	end
-	StartCrateEspScan()
-end
-
-local function FormatScannerTarget(Target, Distance)
-	local MarkerName = Target.Marker and GetCrateInstanceName(Target.Marker) or "name alias"
-	return "raw="
-		.. tostring(Target.RawName or Target.DisplayName)
-		.. " | marker="
-		.. MarkerName
-		.. " | class="
-		.. GetCrateClassName(Target.Owner)
-		.. " | distance="
-		.. tostring(math.floor(Distance + 0.5))
-		.. "u | path="
-		.. GetCrateFullName(Target.Owner)
-end
-
-local function GetAimedInstance()
-	local MouseTarget
-	pcall(function()
-		MouseTarget = LocalPlayer:GetMouse().Target
-	end)
-	if MouseTarget then
-		return MouseTarget
-	end
-
-	local Camera = Workspace.CurrentCamera
-	if not Camera then
-		return nil
-	end
-	local RayResult
-	pcall(function()
-		RayResult = Workspace:Raycast(
-			Camera.CFrame.Position,
-			Camera.CFrame.LookVector * 1000
-		)
-	end)
-	return RayResult and RayResult.Instance or nil
-end
-
-local function CaptureNearbyContainers()
+local function CaptureAimedContainer()
 	if not Flags.CrateScannerEnabled then
 		CrateScannerStatus.Text = "enable scanner first"
 		return
 	end
-	if CrateEspScanRunning then
-		CrateScannerStatus.Text = "indexing containers..."
-		return
-	end
-	if not CrateEspScanComplete then
-		CrateScannerStatus.Text = "indexing containers..."
-		StartCrateEspScan()
-		task.spawn(function()
-			local Deadline = tick() + 4
-			while Flags.Running and CrateEspScanRunning and tick() < Deadline do
-				task.wait(0.05)
-			end
-			if Flags.Running and Flags.CrateScannerEnabled and CrateEspScanComplete then
-				CaptureNearbyContainers()
-			elseif Flags.Running and Flags.CrateScannerEnabled then
-				CrateScannerStatus.Text = "container index unavailable"
-			end
-		end)
+
+	local Target = GetAimedScannerInstance()
+	if not Target then
+		CrateScannerStatus.Text = "aim at a case first"
 		return
 	end
 
-	local RootPart = GetLocalRoot()
-	local Camera = Workspace.CurrentCamera
-	local Origin = GetPartPosition(RootPart)
-	if not Origin and Camera then
-		pcall(function()
-			Origin = Camera.CFrame.Position
-		end)
-	end
-	if not Origin then
-		CrateScannerStatus.Text = "player position unavailable"
-		return
-	end
-
-	local Nearby = {}
-	for _, Target in pairs(CrateEspTargets) do
-		local Position = GetPartPosition(Target.Part)
-		if Position then
-			local Distance = (Position - Origin).Magnitude
-			if Distance <= 35 then
-				Nearby[#Nearby + 1] = {
-					Target = Target,
-					Distance = Distance,
-				}
-			end
-		end
-	end
-	table.sort(Nearby, function(A, B)
-		return A.Distance < B.Distance
-	end)
-
+	local Root = FindScannerRoot(Target)
+	local Markers = CollectLocalContainerMarkers(Root)
 	local Lines = {
-		"nearby container workspace identities:",
+		"aimed object: " .. GetScannerPath(Target),
+		"local scanner root: " .. GetScannerPath(Root),
+		"container markers: " .. tostring(#Markers),
 	}
-	for Index = 1, math.min(#Nearby, 16) do
-		local Item = Nearby[Index]
-		Lines[#Lines + 1] = tostring(Index) .. ". " .. FormatScannerTarget(Item.Target, Item.Distance)
-	end
 
-	local Aimed = GetAimedInstance()
-	if Aimed then
-		Lines[#Lines + 1] = "aimed hierarchy:"
-		local Cursor = Aimed
-		for Level = 1, 7 do
-			if not Cursor then
-				break
-			end
-			Lines[#Lines + 1] = tostring(Level)
-				.. ". "
-				.. GetCrateClassName(Cursor)
-				.. " | "
-				.. GetCrateFullName(Cursor)
-			Cursor = GetCrateParent(Cursor)
+	local SeenOwners = {}
+	for _, Marker in ipairs(Markers) do
+		local Owner = FindContainerOwner(Marker, Root)
+		local OwnerPath = GetScannerPath(Owner)
+		if not SeenOwners[OwnerPath] then
+			SeenOwners[OwnerPath] = true
+			Lines[#Lines + 1] = "raw="
+				.. GetScannerName(Owner)
+				.. " | owner_class="
+				.. GetScannerClass(Owner)
+				.. " | marker="
+				.. GetScannerName(Marker)
+				.. " | marker_class="
+				.. GetScannerClass(Marker)
+				.. " | path="
+				.. OwnerPath
 		end
 	end
 
-	if #Nearby == 0 and not Aimed then
-		CrateScannerStatus.Text = "no container within 35u"
-		CrateScannerStatus.Report = table.concat(Lines, "\n")
-		return
+	Lines[#Lines + 1] = "aimed hierarchy:"
+	local Cursor = Target
+	for Level = 1, 7 do
+		if not Cursor then
+			break
+		end
+		Lines[#Lines + 1] = tostring(Level)
+			.. ". "
+			.. GetScannerClass(Cursor)
+			.. " | "
+			.. GetScannerPath(Cursor)
+		Cursor = GetScannerParent(Cursor)
 	end
 
 	CrateScannerStatus.Report = table.concat(Lines, "\n")
-	CrateScannerStatus.Text = #Nearby > 0
-			and ("captured " .. tostring(math.min(#Nearby, 16)) .. " nearby")
-		or "captured aimed hierarchy"
+	CrateScannerStatus.Text = #Markers > 0
+			and ("captured case + " .. tostring(#Markers) .. " marker(s)")
+			or "captured aimed case (no marker)"
 	warn("case scanner captured:\n" .. CrateScannerStatus.Report)
 end
 
-CaptureAimedCrate = CaptureNearbyContainers
+CaptureAimedCrate = CaptureAimedContainer
 
 CopyCrateScannerReport = function()
 	if CrateScannerStatus.Report == "" then
-		CrateScannerStatus.Text = "scan nearby first"
+		CrateScannerStatus.Text = "scan an aimed case first"
 		return
 	end
 	local Clipboard = Environment.setclipboard or Environment.toclipboard
@@ -2276,284 +2066,24 @@ CopyCrateScannerReport = function()
 		return
 	end
 	local Success = pcall(Clipboard, CrateScannerStatus.Report)
-	CrateScannerStatus.Text = Success and "workspace IDs copied" or "copy failed"
+	CrateScannerStatus.Text = Success and "workspace ID copied" or "copy failed"
 end
 
-local CrateDescendantConnection
+local ScannerInputConnection
 pcall(function()
-	CrateDescendantConnection = Workspace.DescendantAdded:Connect(function(Instance)
-		if not Flags.Running or (not Flags.CrateEspEnabled and not Flags.CrateScannerEnabled) then
-			return
+	ScannerInputConnection = UserInputService.InputBegan:Connect(function(Input, Processed)
+		if
+			Flags.Running
+			and Flags.CrateScannerEnabled
+			and not Processed
+			and Input.KeyCode == Enum.KeyCode.F
+		then
+			task.defer(CaptureAimedContainer)
 		end
-		if not IsContainerMarker(Instance) and not GetConfirmedCrateAlias(Instance) then
-			return
-		end
-		task.defer(function()
-			if not Flags.Running then
-				return
-			end
-			local TargetMap = {}
-			if CacheCrateTarget(TargetMap, Instance) then
-				for Key, Target in pairs(TargetMap) do
-					CrateEspTargets[Key] = Target
-				end
-			end
-		end)
 	end)
 end)
-if CrateDescendantConnection then
-	TrackConnection(CrateDescendantConnection)
-end
-
-local ScannerKeyWasDown = false
-TrackConnection(RunService.Heartbeat:Connect(function()
-	if not Flags.Running or not Flags.CrateScannerEnabled then
-		ScannerKeyWasDown = false
-		return
-	end
-	local IsDown = false
-	pcall(function()
-		IsDown = UserInputService:IsKeyDown(Enum.KeyCode.F)
-	end)
-	if IsDown and not ScannerKeyWasDown then
-		task.defer(CaptureNearbyContainers)
-	end
-	ScannerKeyWasDown = IsDown
-end))
-
-local function CreateCrateEspBundle()
-	local Bundle = {
-		Label = CreateDrawingObject("Text"),
-		Lines = {},
-		Outlines = {},
-	}
-	if not Bundle.Label then
-		return nil
-	end
-	SetTextDefaults(Bundle.Label, true)
-	SetDrawingProperty(Bundle.Label, "ZIndex", 18)
-
-	for Index = 1, 8 do
-		local Outline = CreateDrawingObject("Line")
-		local Line = CreateDrawingObject("Line")
-		if not Outline or not Line then
-			return nil
-		end
-		SetDrawingProperty(Outline, "Color", Color3.fromRGB(0, 0, 0))
-		SetDrawingProperty(Outline, "Thickness", 3)
-		SetDrawingProperty(Outline, "Transparency", 0.85)
-		SetDrawingProperty(Outline, "ZIndex", 16)
-		SetDrawingProperty(Outline, "Visible", false)
-		SetDrawingProperty(Line, "Thickness", 1)
-		SetDrawingProperty(Line, "ZIndex", 17)
-		SetDrawingProperty(Line, "Visible", false)
-		Bundle.Outlines[Index] = Outline
-		Bundle.Lines[Index] = Line
-	end
-	CrateEspBundles[#CrateEspBundles + 1] = Bundle
-	return Bundle
-end
-
-local function HideCrateEspBundle(Bundle)
-	SetDrawingProperty(Bundle.Label, "Visible", false)
-	for Index = 1, 8 do
-		SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
-		SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
-	end
-end
-
-local function HideAllCrateEspBundles()
-	for _, Bundle in ipairs(CrateEspBundles) do
-		HideCrateEspBundle(Bundle)
-	end
-end
-
-local function CrateSelectionContains(Selection, Name)
-	for _, Selected in ipairs(Selection or {}) do
-		if Selected == Name then
-			return true
-		end
-	end
-	return false
-end
-
-local function ShouldDrawCrate(Target)
-	if Target.Category == "Others" then
-		return CrateSelectionContains(Flags.CrateEspTrackedOthers, Target.DisplayName)
-	end
-	return CrateSelectionContains(Flags.CrateEspTrackedNames, "All crates")
-		or CrateSelectionContains(Flags.CrateEspTrackedNames, Target.DisplayName)
-end
-
-local function GetCrateBounds(Target)
-	local BoxCFrame = Target.BoundsCFrame
-	local BoxSize = Target.BoundsSize
-	if not BoxCFrame or not BoxSize then
-		if CrateSafeIsA(Target.Owner, "Model") then
-			pcall(function()
-				BoxCFrame, BoxSize = Target.Owner:GetBoundingBox()
-			end)
-		end
-		if not BoxCFrame or not BoxSize then
-			pcall(function()
-				BoxCFrame = Target.Part.CFrame
-				BoxSize = Target.Part.Size
-			end)
-		end
-		Target.BoundsCFrame = BoxCFrame
-		Target.BoundsSize = BoxSize
-	end
-	if not BoxCFrame or not BoxSize then
-		return nil
-	end
-
-	local Half = BoxSize * 0.5
-	local MinX, MinY = math.huge, math.huge
-	local MaxX, MaxY = -math.huge, -math.huge
-	local VisibleCorner = false
-	for _, X in ipairs({ -1, 1 }) do
-		for _, Y in ipairs({ -1, 1 }) do
-			for _, Z in ipairs({ -1, 1 }) do
-				local WorldPoint = BoxCFrame:PointToWorldSpace(Vector3.new(
-					Half.X * X,
-					Half.Y * Y,
-					Half.Z * Z
-				))
-				local ScreenPoint, OnScreen = ProjectToScreen(WorldPoint)
-				if ScreenPoint and ScreenPoint.Z > 0 then
-					MinX = math.min(MinX, ScreenPoint.X)
-					MinY = math.min(MinY, ScreenPoint.Y)
-					MaxX = math.max(MaxX, ScreenPoint.X)
-					MaxY = math.max(MaxY, ScreenPoint.Y)
-					VisibleCorner = VisibleCorner or OnScreen
-				end
-			end
-		end
-	end
-	if MinX == math.huge or not VisibleCorner then
-		return nil
-	end
-	return MinX, MinY, math.max(4, MaxX - MinX), math.max(4, MaxY - MinY)
-end
-
-local function SetCrateLine(Line, From, To, Color, Alpha)
-	SetDrawingProperty(Line, "From", From)
-	SetDrawingProperty(Line, "To", To)
-	SetDrawingProperty(Line, "Color", Color)
-	SetDrawingProperty(Line, "Transparency", Alpha)
-	SetDrawingProperty(Line, "Visible", true)
-end
-
-local function DrawCrateBox(Bundle, X, Y, Width, Height)
-	local Left = X
-	local Right = X + Width
-	local Top = Y
-	local Bottom = Y + Height
-	local Segments
-	if Flags.CrateEspBoxStyle == "Full" then
-		Segments = {
-			{ Vector2.new(Left, Top), Vector2.new(Right, Top) },
-			{ Vector2.new(Right, Top), Vector2.new(Right, Bottom) },
-			{ Vector2.new(Right, Bottom), Vector2.new(Left, Bottom) },
-			{ Vector2.new(Left, Bottom), Vector2.new(Left, Top) },
-		}
-	else
-		local CornerWidth = math.max(3, Width * 0.25)
-		local CornerHeight = math.max(3, Height * 0.25)
-		Segments = {
-			{ Vector2.new(Left, Top), Vector2.new(Left + CornerWidth, Top) },
-			{ Vector2.new(Left, Top), Vector2.new(Left, Top + CornerHeight) },
-			{ Vector2.new(Right, Top), Vector2.new(Right - CornerWidth, Top) },
-			{ Vector2.new(Right, Top), Vector2.new(Right, Top + CornerHeight) },
-			{ Vector2.new(Left, Bottom), Vector2.new(Left + CornerWidth, Bottom) },
-			{ Vector2.new(Left, Bottom), Vector2.new(Left, Bottom - CornerHeight) },
-			{ Vector2.new(Right, Bottom), Vector2.new(Right - CornerWidth, Bottom) },
-			{ Vector2.new(Right, Bottom), Vector2.new(Right, Bottom - CornerHeight) },
-		}
-	end
-
-	for Index = 1, 8 do
-		local Segment = Segments[Index]
-		if Segment then
-			SetCrateLine(Bundle.Outlines[Index], Segment[1], Segment[2], Color3.fromRGB(0, 0, 0), 0.85)
-			SetCrateLine(Bundle.Lines[Index], Segment[1], Segment[2], Flags.CrateEspColor, Flags.CrateEspAlpha)
-		else
-			SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
-			SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
-		end
-	end
-end
-
-local function UpdateCrateEspFrame()
-	if not Flags.CrateEspEnabled then
-		HideAllCrateEspBundles()
-		CrateEspStatus.Text = "off"
-		return
-	end
-	if not CrateEspScanComplete and not CrateEspScanRunning then
-		StartCrateEspScan()
-	end
-
-	local RootPart = GetLocalRoot()
-	local Origin = GetPartPosition(RootPart)
-	local ActiveBundles = {}
-	local DrawnCount = 0
-	local FoundCount = 0
-	local BundleIndex = 0
-
-	for _, Target in pairs(CrateEspTargets) do
-		if ShouldDrawCrate(Target) then
-			FoundCount = FoundCount + 1
-			local Position = GetPartPosition(Target.Part)
-			if Position and Origin then
-				local Distance = (Position - Origin).Magnitude
-				if Distance <= Flags.CrateEspMaxDistance then
-					local Center, CenterVisible = ProjectToScreen(Position)
-					if Center and Center.Z > 0 and CenterVisible then
-						local X, Y, Width, Height = GetCrateBounds(Target)
-						if X then
-							BundleIndex = BundleIndex + 1
-							local Bundle = CrateEspBundles[BundleIndex] or CreateCrateEspBundle()
-							if Bundle then
-								if Flags.CrateEspBox then
-									DrawCrateBox(Bundle, X, Y, Width, Height)
-								else
-									for Index = 1, 8 do
-										SetDrawingProperty(Bundle.Outlines[Index], "Visible", false)
-										SetDrawingProperty(Bundle.Lines[Index], "Visible", false)
-									end
-								end
-
-								local Text = Target.DisplayName
-								if Flags.CrateEspShowDistance then
-									Text = Text .. "  [" .. tostring(math.floor(Distance + 0.5)) .. "u]"
-								end
-								SetDrawingProperty(Bundle.Label, "Text", Text)
-								SetDrawingProperty(Bundle.Label, "Position", Vector2.new(X + Width * 0.5, Y - 15))
-								SetDrawingProperty(Bundle.Label, "Color", Flags.CrateEspColor)
-								SetDrawingProperty(Bundle.Label, "Transparency", Flags.CrateEspAlpha)
-								SetDrawingProperty(Bundle.Label, "Visible", true)
-								ActiveBundles[Bundle] = true
-								DrawnCount = DrawnCount + 1
-							end
-						end
-					end
-				end
-			end
-		end
-	end
-
-	for _, Bundle in ipairs(CrateEspBundles) do
-		if not ActiveBundles[Bundle] then
-			HideCrateEspBundle(Bundle)
-		end
-	end
-
-	CrateEspStatus.Text = tostring(DrawnCount)
-		.. "/"
-		.. tostring(FoundCount)
-		.. " containers"
-		.. (CrateEspScanRunning and " | indexing" or "")
+if ScannerInputConnection then
+	TrackConnection(ScannerInputConnection)
 end
 
 TrackConnection(RunService.RenderStepped:Connect(function()
@@ -2564,16 +2094,6 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 	local Success, ErrorMessage = pcall(UpdateEspFrame)
 	if not Success then
 		ReportEspError("ESP frame failed", ErrorMessage)
-	end
-
-	local CrateSuccess, CrateError = pcall(UpdateCrateEspFrame)
-	if not CrateSuccess then
-		HideAllCrateEspBundles()
-		CrateEspStatus.Text = "update unavailable"
-		if not CrateEspErrorReported then
-			CrateEspErrorReported = true
-			warn("crate ESP update failed: " .. tostring(CrateError))
-		end
 	end
 end))
 
