@@ -81,14 +81,8 @@ local Connections = {}
 local Drawings = {}
 local Win
 local SilentAim
-local LockedPlayer
 local SmoothedAimPosition
 local SmoothedAimTargetName
-local AimTargetCache = {}
-local CachedLocalCharacter
-local CachedLocalRoot
-local LocalMouse = LocalPlayer:GetMouse()
-local ActivePlayers = Players:GetPlayers()
 local EspStatus = {
 	Text = "off",
 	LastError = nil,
@@ -111,27 +105,9 @@ end
 
 local function ClearLock()
 	Flags.LockedPlayerName = nil
-	LockedPlayer = nil
 	SmoothedAimPosition = nil
 	SmoothedAimTargetName = nil
 end
-
-TrackConnection(Players.PlayerRemoving:Connect(function(Player)
-	AimTargetCache[Player] = nil
-	if LockedPlayer == Player then
-		ClearLock()
-	end
-	for Index = #ActivePlayers, 1, -1 do
-		if ActivePlayers[Index] == Player then
-			table.remove(ActivePlayers, Index)
-			break
-		end
-	end
-end))
-
-TrackConnection(Players.PlayerAdded:Connect(function(Player)
-	ActivePlayers[#ActivePlayers + 1] = Player
-end))
 
 function Runtime.Unload()
 	if not Flags.Running then
@@ -205,43 +181,24 @@ end
 
 local function GetLocalRoot()
 	local Character = LocalPlayer.Character
-	if Character ~= CachedLocalCharacter then
-		CachedLocalCharacter = Character
-		CachedLocalRoot = Character
-			and Character:FindFirstChild("HumanoidRootPart")
-	end
-	if CachedLocalRoot and CachedLocalRoot.Parent then
-		return CachedLocalRoot
-	end
-	CachedLocalRoot = Character
-		and Character:FindFirstChild("HumanoidRootPart")
-	return CachedLocalRoot
-end
-
-local function ReadTeamMatch(Player)
-	return Player.Team ~= nil
-		and Player.Team == LocalPlayer.Team
-end
-
-local function HasSameRobloxTeam(Player)
-	local Success, Result = pcall(ReadTeamMatch, Player)
-	return Success and Result
+	return Character and Character:FindFirstChild("HumanoidRootPart")
 end
 
 local function IsTeammate(Player)
-	return Flags.TeamCheck
-		and HasSameRobloxTeam(Player)
-end
+	if not Flags.TeamCheck then
+		return false
+	end
 
-local function ReadPartPosition(Part)
-	return Part.Position
+	local Success, Result = pcall(function()
+		return Player.Team ~= nil and Player.Team == LocalPlayer.Team
+	end)
+	return Success and Result
 end
 
 local function GetPartPosition(Part)
-	if not Part then
-		return nil
-	end
-	local Success, Position = pcall(ReadPartPosition, Part)
+	local Success, Position = pcall(function()
+		return Part and Part.Position
+	end)
 	if Success then
 		return Position
 	end
@@ -260,246 +217,167 @@ local function ProjectToScreen(Position)
 	return ScreenPosition, OnScreen
 end
 
-local function MeasureTargetPart(Part, MouseX, MouseY, BestDistanceSquared)
-	if not Part then
-		return nil
-	end
-	local Position = GetPartPosition(Part)
-	local ScreenPosition, OnScreen = ProjectToScreen(Position)
-	if not ScreenPosition or not OnScreen then
-		return nil
-	end
-	local DeltaX = ScreenPosition.X - MouseX
-	local DeltaY = ScreenPosition.Y - MouseY
-	local DistanceSquared = DeltaX * DeltaX + DeltaY * DeltaY
-	if DistanceSquared >= BestDistanceSquared then
-		return nil
-	end
-	return Part, Position, DistanceSquared
-end
+local function ResolveTargetPart(Character, Head, RootPart, UpperTorso)
+	local Mouse = LocalPlayer:GetMouse()
+	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
+	local ClosestPart
+	local ClosestDistance = math.huge
+	local SeenParts = {}
 
-local function ResolveTargetPart(Target, MouseX, MouseY)
-	local BestPart
-	local BestPosition
-	local BestDistanceSquared = math.huge
-	local FallbackPart
+	local function ConsiderPart(Part)
+		if not Part or SeenParts[Part] then
+			return
+		end
+		SeenParts[Part] = true
+
+		if not ClosestPart then
+			ClosestPart = Part
+		end
+
+		local ScreenPosition, OnScreen = ProjectToScreen(GetPartPosition(Part))
+		if not OnScreen then
+			return
+		end
+
+		local DeltaX = ScreenPosition.X - MousePosition.X
+		local DeltaY = ScreenPosition.Y - MousePosition.Y
+		local Distance = math.sqrt(DeltaX * DeltaX + DeltaY * DeltaY)
+		if Distance < ClosestDistance then
+			ClosestDistance = Distance
+			ClosestPart = Part
+		end
+	end
+
 	local SelectedParts = Flags.TargetParts
-	local SelectedCount = type(SelectedParts) == "table"
-			and #SelectedParts
-		or 0
+	if type(SelectedParts) ~= "table" or #SelectedParts == 0 then
+		SelectedParts = { "Head" }
+	end
 
-	for Index = 1, math.max(SelectedCount, 1) do
-		local PartName = SelectedCount > 0
-				and SelectedParts[Index]
-				or "Head"
-		local Part
+	for _, PartName in SelectedParts do
 		if PartName == "Head" then
-			Part = Target.Head
+			ConsiderPart(Head)
 		elseif PartName == "Upper Torso" then
-			Part = Target.UpperTorso
+			ConsiderPart(UpperTorso)
 		elseif PartName == "Humanoid Root Part" then
-			Part = Target.RootPart
+			ConsiderPart(RootPart)
 		elseif PartName == "Closest" then
-			for _, Child in Target.Character:GetChildren() do
-				if Child:IsA("BasePart") then
-					FallbackPart = FallbackPart or Child
-					local Candidate, Position, DistanceSquared =
-						MeasureTargetPart(
-							Child,
-							MouseX,
-							MouseY,
-							BestDistanceSquared
-						)
-					if Candidate then
-						BestPart = Candidate
-						BestPosition = Position
-						BestDistanceSquared = DistanceSquared
-					end
+			for _, Part in Character:GetChildren() do
+				if Part:IsA("BasePart") then
+					ConsiderPart(Part)
 				end
 			end
 		end
-
-		if Part then
-			FallbackPart = FallbackPart or Part
-			local Candidate, Position, DistanceSquared =
-				MeasureTargetPart(
-					Part,
-					MouseX,
-					MouseY,
-					BestDistanceSquared
-				)
-			if Candidate then
-				BestPart = Candidate
-				BestPosition = Position
-				BestDistanceSquared = DistanceSquared
-			end
-		end
 	end
 
-	if BestPart then
-		return BestPart, BestPosition, BestDistanceSquared
-	end
-	FallbackPart = FallbackPart
-		or Target.Head
-		or Target.UpperTorso
-		or Target.RootPart
-	return FallbackPart, GetPartPosition(FallbackPart), math.huge
+	return ClosestPart or Head or UpperTorso or RootPart
 end
 
-local function ReadHumanoidHealth(Humanoid)
-	return Humanoid and Humanoid.Health
-end
-
-local function ReadHumanoidVitals(Humanoid)
-	return Humanoid.Health, Humanoid.MaxHealth
-end
-
-local function GetAimTargetRecord(Player)
-	if not Player or Player == LocalPlayer or IsTeammate(Player) then
+local function BuildTarget(Player)
+	if not Player or Player.Name == LocalPlayer.Name or IsTeammate(Player) then
 		return nil
 	end
+
 	local Character = Player.Character
 	if not Character then
-		AimTargetCache[Player] = nil
 		return nil
 	end
 
-	local Target = AimTargetCache[Player]
-	local PartsExpired = Target
-		and (
-			not Target.Humanoid
-			or not Target.Humanoid.Parent
-			or not Target.RootPart
-			or not Target.RootPart.Parent
-			or not (Target.Head or Target.UpperTorso)
-			or (
-				Target.Head
-				and not Target.Head.Parent
-			)
-			or (
-				Target.UpperTorso
-				and not Target.UpperTorso.Parent
-			)
-		)
-	if not Target or Target.Character ~= Character or PartsExpired then
-		Target = {
-			Player = Player,
-			Character = Character,
-			Humanoid = Character:FindFirstChild("Humanoid"),
-			Head = Character:FindFirstChild("Head"),
-			RootPart = Character:FindFirstChild("HumanoidRootPart"),
-			UpperTorso = Character:FindFirstChild("UpperTorso"),
-		}
-		AimTargetCache[Player] = Target
-	end
-	if not Target.RootPart or not (Target.Head or Target.UpperTorso) then
+	local Humanoid = Character:FindFirstChild("Humanoid")
+	local Head = Character:FindFirstChild("Head")
+	local RootPart = Character:FindFirstChild("HumanoidRootPart")
+	local UpperTorso = Character:FindFirstChild("UpperTorso")
+	local HealthSuccess, Health = pcall(function()
+		return Humanoid and Humanoid.Health
+	end)
+	if not HealthSuccess or not Health or Health <= 0 or not RootPart or not (Head or UpperTorso) then
 		return nil
 	end
 
-	local HealthSuccess, Health = pcall(
-		ReadHumanoidHealth,
-		Target.Humanoid
-	)
-	if not HealthSuccess or not Health or Health <= 0 then
+	local TargetPart = ResolveTargetPart(Character, Head, RootPart, UpperTorso)
+	if not TargetPart then
 		return nil
 	end
-	return Target
+
+	return {
+		Player = Player,
+		Character = Character,
+		Humanoid = Humanoid,
+		Head = Head,
+		RootPart = RootPart,
+		UpperTorso = UpperTorso,
+		TargetPart = TargetPart,
+	}
 end
 
-local function BuildTarget(Player, MouseX, MouseY)
-	local Target = GetAimTargetRecord(Player)
-	if not Target then
-		return nil
-	end
-	local TargetPart, TargetPosition, ScreenDistanceSquared =
-		ResolveTargetPart(Target, MouseX, MouseY)
-	if not TargetPart or not TargetPosition then
-		return nil
-	end
-	Target.TargetPart = TargetPart
-	Target.TargetPosition = TargetPosition
-	Target.ScreenDistanceSquared = ScreenDistanceSquared
-	return Target
-end
-
-local function GetLockedTarget(MouseX, MouseY)
+local function GetLockedTarget()
 	if not Flags.LockedPlayerName then
 		return nil
 	end
-	if not LockedPlayer or LockedPlayer.Name ~= Flags.LockedPlayerName then
-		LockedPlayer = Players:FindFirstChild(Flags.LockedPlayerName)
+
+	for _, Player in Players:GetPlayers() do
+		if Player.Name == Flags.LockedPlayerName then
+			return BuildTarget(Player)
+		end
 	end
-	local Target = BuildTarget(LockedPlayer, MouseX, MouseY)
-	if not Target then
-		ClearLock()
-	end
-	return Target
+
+	return nil
 end
 
-local function FindClosestTarget(UseFov, FovRadius, MaxDistance)
+local function FindClosestTarget(Selection)
+	Selection = Selection or {}
+	local UseFov = Selection.FovCheck
 	if UseFov == nil then
 		UseFov = Flags.FovCheck
 	end
-	FovRadius = FovRadius or Flags.FovRadius
-	local FovRadiusSquared = FovRadius * FovRadius
-	MaxDistance = MaxDistance or Flags.MaxAcquireDistance
-	local MaxDistanceSquared = MaxDistance * MaxDistance
-	local MouseX = LocalMouse.X
-	local MouseY = LocalMouse.Y
-	local LocalPosition = GetPartPosition(GetLocalRoot())
+	local FovRadius = Selection.FovRadius or Flags.FovRadius
+	local MaxDistance = Selection.MaxDistance or Flags.MaxAcquireDistance
+	local Mouse = LocalPlayer:GetMouse()
+	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
+	local LocalRoot = GetLocalRoot()
 	local ClosestTarget
-	local ClosestScreenDistanceSquared = math.huge
-	local ClosestWorldDistanceSquared
+	local ClosestScreenDistance = math.huge
+	local ClosestWorldDistance
 
-	for _, Player in ActivePlayers do
-		local Target = BuildTarget(Player, MouseX, MouseY)
-		local TargetPosition = Target and Target.TargetPosition
-		local ScreenDistanceSquared = Target
-			and Target.ScreenDistanceSquared
-		if
-			not TargetPosition
-			or not ScreenDistanceSquared
-			or ScreenDistanceSquared == math.huge
-		then
+	for _, Player in Players:GetPlayers() do
+		local Target = BuildTarget(Player)
+		if not Target then
 			continue
 		end
 
-		local WorldDistanceSquared
+		local TargetPosition = GetPartPosition(Target.TargetPart)
+		if not TargetPosition then
+			continue
+		end
+
+		local LocalPosition = GetPartPosition(LocalRoot)
+		local WorldDistance
 		if LocalPosition then
-			local Offset = LocalPosition - TargetPosition
-			WorldDistanceSquared = Offset.X * Offset.X
-				+ Offset.Y * Offset.Y
-				+ Offset.Z * Offset.Z
-			if WorldDistanceSquared > MaxDistanceSquared then
+			WorldDistance = (LocalPosition - TargetPosition).Magnitude
+			if WorldDistance > MaxDistance then
 				continue
 			end
 		end
-		if UseFov and ScreenDistanceSquared > FovRadiusSquared then
+
+		local ScreenPosition, OnScreen = ProjectToScreen(TargetPosition)
+		if not OnScreen then
 			continue
 		end
-		if ScreenDistanceSquared < ClosestScreenDistanceSquared then
-			ClosestScreenDistanceSquared = ScreenDistanceSquared
+
+		local DeltaX = ScreenPosition.X - MousePosition.X
+		local DeltaY = ScreenPosition.Y - MousePosition.Y
+		local ScreenDistance = math.sqrt(DeltaX * DeltaX + DeltaY * DeltaY)
+		if UseFov and ScreenDistance > FovRadius then
+			continue
+		end
+
+		if ScreenDistance < ClosestScreenDistance then
+			ClosestScreenDistance = ScreenDistance
 			ClosestTarget = Target
-			ClosestWorldDistanceSquared = WorldDistanceSquared
+			ClosestWorldDistance = WorldDistance
 		end
 	end
 
-	if not ClosestTarget then
-		return nil, math.huge, nil
-	end
-	return ClosestTarget,
-		math.sqrt(ClosestScreenDistanceSquared),
-		ClosestWorldDistanceSquared
-			and math.sqrt(ClosestWorldDistanceSquared)
-			or nil
-end
-
-local function ReadAssemblyVelocity(Part)
-	return Part.AssemblyLinearVelocity
-end
-
-local function ReadLegacyVelocity(Part)
-	return Part.Velocity
+	return ClosestTarget, ClosestScreenDistance, ClosestWorldDistance
 end
 
 local function PredictTargetPosition(Target, Origin)
@@ -508,8 +386,7 @@ local function PredictTargetPosition(Target, Origin)
 		return nil
 	end
 
-	local Position = Target.TargetPosition
-		or GetPartPosition(TargetPart)
+	local Position = GetPartPosition(TargetPart)
 	if not Position then
 		return nil
 	end
@@ -520,36 +397,26 @@ local function PredictTargetPosition(Target, Origin)
 	local ProjectileSpeed = math.max(Flags.ProjectileSpeed, 1)
 	local Distance = (Origin - Position).Magnitude
 	local TravelTime = Distance / ProjectileSpeed
-	local NetworkTime = Flags.NetworkScale ~= 0
-			and GetPingSeconds() * Flags.NetworkScale
-		or 0
+	local NetworkTime = GetPingSeconds() * Flags.NetworkScale
 	local PredictionTime = (TravelTime + NetworkTime) * Flags.PredictionScale
 	PredictionTime = Clamp(PredictionTime, 0, Flags.MaxPredictionTime)
 
-	local VelocitySuccess, Velocity = pcall(
-		ReadAssemblyVelocity,
-		Target.RootPart
-	)
+	local VelocitySuccess, Velocity = pcall(function()
+		return Target.RootPart.AssemblyLinearVelocity
+	end)
 	if not VelocitySuccess or not Velocity then
-		VelocitySuccess, Velocity = pcall(
-			ReadLegacyVelocity,
-			TargetPart
-		)
+		VelocitySuccess, Velocity = pcall(function()
+			return TargetPart.Velocity
+		end)
 	end
 	if not VelocitySuccess or not Velocity then
 		Velocity = Vector3.new(0, 0, 0)
 	end
 
 	local PredictedPosition = Position + Velocity * PredictionTime
-	local DropCompensation = 0.5
-		* Flags.GravityCompensation
-		* PredictionTime
-		* PredictionTime
-	if DropCompensation == 0 then
-		return PredictedPosition
-	end
-	return PredictedPosition
-		+ Vector3.new(0, DropCompensation, 0)
+	local DropCompensation = 0.5 * Flags.GravityCompensation * PredictionTime * PredictionTime
+
+	return PredictedPosition + Vector3.new(0, DropCompensation, 0)
 end
 
 local function UpdateSilentTargetStatus(Target, ScreenDistance, WorldDistance)
@@ -575,11 +442,11 @@ SilentAim = function(Origin)
 		return nil
 	end
 
-	local Target, ScreenDistance, WorldDistance = FindClosestTarget(
-		Flags.SilentFovCheck,
-		Flags.SilentFovRadius,
-		Flags.SilentMaxDistance
-	)
+	local Target, ScreenDistance, WorldDistance = FindClosestTarget({
+		FovCheck = Flags.SilentFovCheck,
+		FovRadius = Flags.SilentFovRadius,
+		MaxDistance = Flags.SilentMaxDistance,
+	})
 	if not Target then
 		UpdateSilentTargetStatus(nil)
 		return nil
@@ -1120,10 +987,36 @@ local EspWeaponCache = {}
 local EspErrorReported = false
 local EspRendererFailed = false
 local EspSkippedProperties = {}
-local EspActiveBundles = {}
-local EspWasVisible = false
-local EspStatusUpdatedAt = -math.huge
-local EspOutlineColor = Color3.fromRGB(0, 0, 0)
+
+local function GetInstanceIdentity(Instance)
+	local Address
+	pcall(function()
+		Address = Instance and Instance.Address
+	end)
+	if type(Address) == "number" and Address > 0 then
+		return tostring(Address)
+	end
+
+	local FullName
+	pcall(function()
+		FullName = Instance and Instance:GetFullName()
+	end)
+	if FullName and FullName ~= "" then
+		return FullName
+	end
+	return tostring(Instance)
+end
+
+local function GetPlayerIdentity(Player)
+	local PlayerName
+	pcall(function()
+		PlayerName = Player and Player.Name
+	end)
+	if PlayerName and PlayerName ~= "" then
+		return PlayerName
+	end
+	return GetInstanceIdentity(Player)
+end
 
 local function ReportEspError(Prefix, ErrorMessage)
 	local FullMessage = Prefix .. ": " .. tostring(ErrorMessage)
@@ -1203,7 +1096,7 @@ local function CreateEspBundle()
 		local OutlineLine = CreateDrawingObject("Line")
 		if OutlineLine then
 			SetDrawingProperty(OutlineLine, "Thickness", 3)
-			SetDrawingProperty(OutlineLine, "Color", EspOutlineColor)
+			SetDrawingProperty(OutlineLine, "Color", Color3.fromRGB(0, 0, 0))
 			SetDrawingProperty(OutlineLine, "Visible", false)
 			SetDrawingProperty(OutlineLine, "ZIndex", 10)
 			Bundle.BoxOutline[#Bundle.BoxOutline + 1] = OutlineLine
@@ -1218,7 +1111,7 @@ local function CreateEspBundle()
 	Bundle.HealthBackground = CreateDrawingObject("Square")
 	Bundle.HealthBar = CreateDrawingObject("Square")
 	SetDrawingProperty(Bundle.HealthBackground, "Filled", true)
-	SetDrawingProperty(Bundle.HealthBackground, "Color", EspOutlineColor)
+	SetDrawingProperty(Bundle.HealthBackground, "Color", Color3.fromRGB(0, 0, 0))
 	SetDrawingProperty(Bundle.HealthBackground, "Visible", false)
 	SetDrawingProperty(Bundle.HealthBackground, "ZIndex", 10)
 
@@ -1234,7 +1127,7 @@ local function CreateEspBundle()
 	Bundle.SnaplineOutline = CreateDrawingObject("Line")
 	Bundle.Snapline = CreateDrawingObject("Line")
 	SetDrawingProperty(Bundle.SnaplineOutline, "Thickness", 3)
-	SetDrawingProperty(Bundle.SnaplineOutline, "Color", EspOutlineColor)
+	SetDrawingProperty(Bundle.SnaplineOutline, "Color", Color3.fromRGB(0, 0, 0))
 	SetDrawingProperty(Bundle.SnaplineOutline, "Visible", false)
 	SetDrawingProperty(Bundle.SnaplineOutline, "ZIndex", 9)
 
@@ -1286,52 +1179,6 @@ local function HideEspBundle(Bundle)
 	end
 end
 
-local function RemoveEspBundle(Bundle)
-	if not Bundle then
-		return
-	end
-	for _, Line in Bundle.BoxOutline do
-		pcall(function()
-			Line:Remove()
-		end)
-	end
-	for _, Line in Bundle.Box do
-		pcall(function()
-			Line:Remove()
-		end)
-	end
-	for _, DrawingObject in {
-		Bundle.Name,
-		Bundle.Info,
-		Bundle.Flag,
-		Bundle.HealthBackground,
-		Bundle.HealthBar,
-		Bundle.Chams,
-		Bundle.SnaplineOutline,
-		Bundle.Snapline,
-	} do
-		if DrawingObject then
-			pcall(function()
-				DrawingObject:Remove()
-			end)
-		end
-	end
-end
-
-TrackConnection(Players.PlayerRemoving:Connect(function(Player)
-	local Bundle = EspBundles[Player]
-	EspBundles[Player] = nil
-	EspTargetCache[Player] = nil
-	if Bundle then
-		EspActiveBundles[Bundle] = nil
-	end
-	local Character = Player.Character
-	if Character then
-		EspWeaponCache[Character] = nil
-	end
-	RemoveEspBundle(Bundle)
-end))
-
 local function HideAllEspBundles()
 	for _, Bundle in EspBundles do
 		HideEspBundle(Bundle)
@@ -1366,7 +1213,8 @@ local function SetEspBoxLines(Lines, X, Y, Width, Height, Color, Alpha)
 end
 
 local function GetEspBundle(Player)
-	local Bundle = EspBundles[Player]
+	local PlayerIdentity = GetPlayerIdentity(Player)
+	local Bundle = EspBundles[PlayerIdentity]
 	if not Bundle then
 		if EspRendererFailed then
 			return nil
@@ -1380,14 +1228,21 @@ local function GetEspBundle(Player)
 		end
 
 		Bundle = Result
-		EspBundles[Player] = Bundle
+		Bundle.PlayerIdentity = PlayerIdentity
+		EspBundles[PlayerIdentity] = Bundle
 	end
 	return Bundle
 end
 
 local function IsEspTeammate(Player)
-	return Flags.EspTeamCheck
-		and HasSameRobloxTeam(Player)
+	if not Flags.EspTeamCheck then
+		return false
+	end
+
+	local Success, Result = pcall(function()
+		return Player.Team ~= nil and Player.Team == LocalPlayer.Team
+	end)
+	return Success and Result
 end
 
 local function GetHeldWeaponName(Character)
@@ -1412,13 +1267,14 @@ end
 
 local function GetCachedWeaponName(Character)
 	local Now = tick()
-	local Cached = EspWeaponCache[Character]
+	local CharacterIdentity = GetInstanceIdentity(Character)
+	local Cached = EspWeaponCache[CharacterIdentity]
 	if Cached and Now < Cached.ExpiresAt then
 		return Cached.Name
 	end
 
 	local WeaponName = GetHeldWeaponName(Character)
-	EspWeaponCache[Character] = {
+	EspWeaponCache[CharacterIdentity] = {
 		Name = WeaponName,
 		ExpiresAt = Now + 0.25,
 	}
@@ -1525,30 +1381,29 @@ local function ResolveEspCharacter(Character)
 end
 
 local function GetEspTarget(Player)
-	if not Player or Player == LocalPlayer then
+	if not Player then
 		return nil
 	end
 
-	if IsEspTeammate(Player) then
+	local PlayerIdentity = GetPlayerIdentity(Player)
+	if PlayerIdentity == GetPlayerIdentity(LocalPlayer) or IsEspTeammate(Player) then
 		return nil
 	end
 
 	local Character = GetPlayerCharacter(Player)
 	if not Character then
-		EspTargetCache[Player] = nil
+		EspTargetCache[PlayerIdentity] = nil
 		return nil
 	end
 
 	local Now = tick()
-	local Cached = EspTargetCache[Player]
+	local CharacterIdentity = GetInstanceIdentity(Character)
+	local Cached = EspTargetCache[PlayerIdentity]
 	local Humanoid
 	local Head
 	local RootPart
 
-	if Cached and Cached.Character ~= Character then
-		EspWeaponCache[Cached.Character] = nil
-	end
-	if Cached and Cached.Character == Character and Now < Cached.ExpiresAt then
+	if Cached and Cached.CharacterIdentity == CharacterIdentity and Now < Cached.ExpiresAt then
 		Humanoid = Cached.Humanoid
 		Head = Cached.Head
 		RootPart = Cached.RootPart
@@ -1562,55 +1417,51 @@ local function GetEspTarget(Player)
 		end)
 		Cached = {
 			Character = Character,
+			CharacterIdentity = CharacterIdentity,
 			Humanoid = Humanoid,
 			Head = Head,
 			RootPart = RootPart,
 			DisplayName = DisplayName,
 			ExpiresAt = Now + 0.75,
 		}
-		EspTargetCache[Player] = Cached
+		EspTargetCache[PlayerIdentity] = Cached
 	end
 
 	if not RootPart or not Head then
 		return nil
 	end
-	local HeadPosition = GetPartPosition(Head)
-	local RootPosition = GetPartPosition(RootPart)
-	if not HeadPosition or not RootPosition then
-		EspTargetCache[Player] = nil
+	if not GetPartPosition(Head) or not GetPartPosition(RootPart) then
+		EspTargetCache[PlayerIdentity] = nil
 		return nil
 	end
 
 	local Health = 100
 	local MaxHealth = 100
 	if Humanoid then
-		local HealthSuccess, CurrentHealth, CurrentMaxHealth = pcall(
-			ReadHumanoidVitals,
-			Humanoid
-		)
-		if HealthSuccess then
-			Health = CurrentHealth or Health
-			MaxHealth = CurrentMaxHealth or MaxHealth
-			if Health <= 0 then
-				return nil
-			end
+		local HealthSuccess = pcall(function()
+			Health = Humanoid.Health
+			MaxHealth = Humanoid.MaxHealth or MaxHealth
+		end)
+		if HealthSuccess and Health <= 0 then
+			return nil
 		end
 	end
 
-	Cached.Player = Player
-	Cached.Health = Health
-	Cached.MaxHealth = math.max(MaxHealth or 100, 1)
-	Cached.WeaponName = Flags.EspWeapon
-			and GetCachedWeaponName(Character)
-		or nil
-	Cached.HeadPosition = HeadPosition
-	Cached.RootPosition = RootPosition
-	return Cached
+	return {
+		Player = Player,
+		Character = Character,
+		Head = Head,
+		RootPart = RootPart,
+		Health = Health,
+		MaxHealth = math.max(MaxHealth or 100, 1),
+		WeaponName = Flags.EspWeapon and GetCachedWeaponName(Character) or nil,
+		DisplayName = Cached and Cached.DisplayName or Player.Name,
+	}
 end
 
 local function GetEspBox(Target)
-	local HeadPosition = Target.HeadPosition
-	local RootPosition = Target.RootPosition
+	local HeadPosition = GetPartPosition(Target.Head)
+	local RootPosition = GetPartPosition(Target.RootPart)
 	if not HeadPosition or not RootPosition then
 		return nil
 	end
@@ -1638,14 +1489,8 @@ local function GetEspBox(Target)
 	return CenterX - Width * 0.5, TopY, Width, Height
 end
 
-local function UpdateEspBundle(
-	Bundle,
-	Target,
-	ViewportSize,
-	Origin,
-	FrameNow
-)
-	local TargetPosition = Target.RootPosition
+local function UpdateEspBundle(Bundle, Target, Camera, Origin)
+	local TargetPosition = GetPartPosition(Target.RootPart)
 	if not TargetPosition then
 		return false
 	end
@@ -1681,7 +1526,7 @@ local function UpdateEspBundle(
 			Y,
 			Width,
 			Height,
-			EspOutlineColor,
+			Color3.fromRGB(0, 0, 0),
 			Flags.EspBoxAlpha
 		)
 		SetEspBoxLines(Bundle.Box, X, Y, Width, Height, Flags.EspBoxColor, Flags.EspBoxAlpha)
@@ -1726,22 +1571,18 @@ local function UpdateEspBundle(
 		Bundle.Name.Visible = false
 	end
 
-	local InfoText
+	local InfoParts = {}
 	if Flags.EspDistance then
-		InfoText = "["
-			.. tostring(math.floor(Distance + 0.5))
-			.. "u]"
+		InfoParts[#InfoParts + 1] = "[" .. tostring(math.floor(Distance + 0.5)) .. "u]"
 	end
 	if Flags.EspWeapon then
 		local WeaponName = Target.WeaponName
 		if WeaponName then
-			InfoText = InfoText
-					and InfoText .. "  " .. WeaponName
-				or WeaponName
+			InfoParts[#InfoParts + 1] = WeaponName
 		end
 	end
-	if InfoText and Bundle.Info then
-		Bundle.Info.Text = InfoText
+	if #InfoParts > 0 and Bundle.Info then
+		Bundle.Info.Text = table.concat(InfoParts, "  ")
 		Bundle.Info.Position = Vector2.new(X + Width * 0.5, Y + Height + 2)
 		Bundle.Info.Color = Flags.EspTextColor
 		Bundle.Info.Transparency = Flags.EspTextAlpha
@@ -1761,6 +1602,10 @@ local function UpdateEspBundle(
 	end
 
 	if Flags.EspSnapline and Bundle.SnaplineOutline and Bundle.Snapline then
+		local ViewportSize
+		pcall(function()
+			ViewportSize = Camera.ViewportSize
+		end)
 		if ViewportSize then
 			local From = Vector2.new(ViewportSize.X * 0.5, ViewportSize.Y)
 			local To = Vector2.new(X + Width * 0.5, Y + Height)
@@ -1787,30 +1632,16 @@ local function UpdateEspBundle(
 		end
 	end
 
-	Bundle.LastDrawnAt = FrameNow
+	Bundle.LastDrawnAt = tick()
 	return true
-end
-
-local function ReadCameraPosition(Camera)
-	return Camera.Position
-end
-
-local function ReadCameraViewportSize(Camera)
-	return Camera.ViewportSize
 end
 
 local function UpdateEspFrame()
 	if not Flags.Running or not Flags.EspEnabled then
-		if EspWasVisible then
-			HideAllEspBundles()
-			EspWasVisible = false
-		end
-		if EspStatus.Text ~= "off" then
-			EspStatus.Text = "off"
-		end
+		HideAllEspBundles()
+		EspStatus.Text = "off"
 		return
 	end
-	EspWasVisible = true
 	if EspRendererFailed then
 		HideAllEspBundles()
 		if not EspStatus.LastError then
@@ -1828,11 +1659,9 @@ local function UpdateEspFrame()
 
 	local Origin = GetPartPosition(GetLocalRoot())
 	if not Origin then
-		local PositionSuccess
-		PositionSuccess, Origin = pcall(ReadCameraPosition, Camera)
-		if not PositionSuccess then
-			Origin = nil
-		end
+		pcall(function()
+			Origin = Camera.Position
+		end)
 	end
 	if not Origin then
 		HideAllEspBundles()
@@ -1843,23 +1672,10 @@ local function UpdateEspFrame()
 	local PlayerCount = 0
 	local ValidCount = 0
 	local DrawnCount = 0
-	local ViewportSize
-	if Flags.EspSnapline then
-		local ViewportSuccess
-		ViewportSuccess, ViewportSize = pcall(
-			ReadCameraViewportSize,
-			Camera
-		)
-		if not ViewportSuccess then
-			ViewportSize = nil
-		end
-	end
-	for Bundle in pairs(EspActiveBundles) do
-		EspActiveBundles[Bundle] = nil
-	end
-	local FrameNow = tick()
-	for _, Player in ActivePlayers do
-		if Player ~= LocalPlayer then
+	local ActiveBundles = {}
+	local LocalPlayerIdentity = GetPlayerIdentity(LocalPlayer)
+	for _, Player in Players:GetPlayers() do
+		if GetPlayerIdentity(Player) ~= LocalPlayerIdentity then
 			PlayerCount = PlayerCount + 1
 		end
 
@@ -1870,13 +1686,7 @@ local function UpdateEspFrame()
 				ValidCount = ValidCount + 1
 				Bundle = GetEspBundle(Player)
 				if Bundle then
-					return UpdateEspBundle(
-						Bundle,
-						Target,
-						ViewportSize,
-						Origin,
-						FrameNow
-					)
+					return UpdateEspBundle(Bundle, Target, Camera, Origin)
 				end
 			end
 			return false
@@ -1885,27 +1695,21 @@ local function UpdateEspFrame()
 			ReportEspError("player update failed", WasDrawn)
 		elseif Success and WasDrawn then
 			DrawnCount = DrawnCount + 1
-			EspActiveBundles[Bundle] = true
+			ActiveBundles[Bundle] = true
 		end
 	end
 
+	local Now = tick()
 	for _, Bundle in EspBundles do
 		if
-			not EspActiveBundles[Bundle]
-			and (
-				not Bundle.LastDrawnAt
-				or FrameNow - Bundle.LastDrawnAt > 0.08
-			)
+			not ActiveBundles[Bundle]
+			and (not Bundle.LastDrawnAt or Now - Bundle.LastDrawnAt > 0.08)
 		then
 			HideEspBundle(Bundle)
 		end
 	end
 
-	if
-		not EspStatus.LastError
-		and FrameNow - EspStatusUpdatedAt >= 0.25
-	then
-		EspStatusUpdatedAt = FrameNow
+	if not EspStatus.LastError then
 		EspStatus.Text = tostring(DrawnCount)
 			.. "/"
 			.. tostring(ValidCount)
@@ -1920,9 +1724,6 @@ end
 
 TrackConnection(RunService.RenderStepped:Connect(function()
 	if not Flags.Running then
-		return
-	end
-	if not Flags.EspEnabled and not EspWasVisible then
 		return
 	end
 
@@ -1945,24 +1746,17 @@ FovCircle.Visible = false
 FovCircle.ZIndex = 5
 
 local SilentStatusUpdatedAt = -math.huge
-local FovWasVisible = false
 
 TrackConnection(RunService.RenderStepped:Connect(function()
 	if not Flags.Running then
 		return
 	end
 
+	local Mouse = LocalPlayer:GetMouse()
+	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
 	local ShowAimFov = Flags.Aimbot and Flags.FovCheck
 	local ShowSilentFov = Flags.SilentAim and Flags.SilentFovCheck
 	local ShowFov = ShowAimFov or ShowSilentFov
-	if
-		not ShowFov
-		and not Flags.SilentAim
-		and not FovWasVisible
-		and SilentAimStatus.Text == "inactive"
-	then
-		return
-	end
 	local DisplayFovRadius = 0
 	if ShowAimFov then
 		DisplayFovRadius = math.max(DisplayFovRadius, Flags.FovRadius)
@@ -1971,44 +1765,30 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 		DisplayFovRadius = math.max(DisplayFovRadius, Flags.SilentFovRadius)
 	end
 
-	if ShowFov then
-		local MousePosition = Vector2.new(LocalMouse.X, LocalMouse.Y)
-		FovCircleOutline.Position = MousePosition
-		FovCircleOutline.Radius = DisplayFovRadius + 1
-		FovCircleOutline.Transparency = Flags.FovAlpha
-		FovCircleOutline.Visible = true
+	FovCircleOutline.Position = MousePosition
+	FovCircleOutline.Radius = DisplayFovRadius + 1
+	FovCircleOutline.Transparency = Flags.FovAlpha
+	FovCircleOutline.Visible = ShowFov
 
-		FovCircle.Position = MousePosition
-		FovCircle.Radius = DisplayFovRadius
-		FovCircle.Color = Flags.FovColor
-		FovCircle.Transparency = Flags.FovAlpha
-		FovCircle.Visible = true
-	elseif FovWasVisible then
-		FovCircleOutline.Visible = false
-		FovCircle.Visible = false
-	end
-	FovWasVisible = ShowFov
+	FovCircle.Position = MousePosition
+	FovCircle.Radius = DisplayFovRadius
+	FovCircle.Color = Flags.FovColor
+	FovCircle.Transparency = Flags.FovAlpha
+	FovCircle.Visible = ShowFov
 
 	local Now = tick()
 	if Flags.SilentAim and Now - SilentStatusUpdatedAt >= 0.1 then
 		SilentStatusUpdatedAt = Now
-		local Target, ScreenDistance, WorldDistance =
-			FindClosestTarget(
-				Flags.SilentFovCheck,
-				Flags.SilentFovRadius,
-				Flags.SilentMaxDistance
-			)
+		local Target, ScreenDistance, WorldDistance = FindClosestTarget({
+			FovCheck = Flags.SilentFovCheck,
+			FovRadius = Flags.SilentFovRadius,
+			MaxDistance = Flags.SilentMaxDistance,
+		})
 		UpdateSilentTargetStatus(Target, ScreenDistance, WorldDistance)
 	elseif not Flags.SilentAim then
-		if SilentAimStatus.Text ~= "inactive" then
-			SilentAimStatus.Text = "inactive"
-		end
+		SilentAimStatus.Text = "inactive"
 	end
 end))
-
-local function ApplyCameraLook(Camera, Origin, Position)
-	Camera.lookAt(Origin, Position)
-end
 
 TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 	if not Flags.Running then
@@ -2016,13 +1796,7 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 	end
 
 	if not Flags.Aimbot or not Flags.AimbotActive then
-		if
-			Flags.LockedPlayerName
-			or LockedPlayer
-			or SmoothedAimPosition
-		then
-			ClearLock()
-		end
+		ClearLock()
 		return
 	end
 
@@ -2033,16 +1807,14 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 
 	local Target
 	if Flags.StickyAim then
-		Target = GetLockedTarget(LocalMouse.X, LocalMouse.Y)
+		Target = GetLockedTarget()
 	end
 
 	if not Target then
 		Flags.LockedPlayerName = nil
-		LockedPlayer = nil
 		Target = FindClosestTarget()
 		if Target and Flags.StickyAim then
 			Flags.LockedPlayerName = Target.Player.Name
-			LockedPlayer = Target.Player
 		end
 	end
 
@@ -2083,12 +1855,9 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 		SmoothedAimTargetName = TargetName
 	end
 
-	local AimSuccess = pcall(
-		ApplyCameraLook,
-		Camera,
-		CameraPosition,
-		LookPosition
-	)
+	local AimSuccess = pcall(function()
+		Camera.lookAt(CameraPosition, LookPosition)
+	end)
 	if not AimSuccess then
 		ClearLock()
 	end
