@@ -241,16 +241,8 @@ local function ProjectToScreen(Position)
 	return ScreenPosition, OnScreen
 end
 
-local LegPartNames = {
-	"Left Leg",
-	"Right Leg",
-	"LeftUpperLeg",
-	"RightUpperLeg",
-	"LeftLowerLeg",
-	"RightLowerLeg",
-	"LeftFoot",
-	"RightFoot",
-}
+local LegPartNames = { "Left Leg", "Right Leg", "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg" }
+local FootPartNames = { "LeftFoot", "RightFoot" }
 
 local function ResolveTargetPart(Character, Head, RootPart, UpperTorso)
 	local Mouse = LocalPlayer:GetMouse()
@@ -298,6 +290,10 @@ local function ResolveTargetPart(Character, Head, RootPart, UpperTorso)
 		elseif PartName == "Legs" then
 			for _, LegPartName in LegPartNames do
 				ConsiderPart(Character:FindFirstChild(LegPartName))
+			end
+		elseif PartName == "Feet" then
+			for _, FootPartName in FootPartNames do
+				ConsiderPart(Character:FindFirstChild(FootPartName))
 			end
 		elseif PartName == "Closest" then
 			for _, Part in Character:GetChildren() do
@@ -721,7 +717,7 @@ local SmoothnessSlider = TargetSection:Slider(
 local TargetHitboxDropdown = TargetSection:Dropdown(
 	"target hitboxes",
 	Flags.TargetParts,
-	{ "Head", "Upper Torso", "Stomach", "Legs", "Closest" },
+	{ "Head", "Upper Torso", "Stomach", "Legs", "Feet", "Closest" },
 	true,
 	function(Value)
 		local SelectedParts = {}
